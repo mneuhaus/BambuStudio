@@ -762,6 +762,60 @@
     }
   },
   {
+    "name": "plate_create_for_printer",
+    "method": "plate.create_for_printer",
+    "description": "Add a new empty plate that becomes a printer group of its own, so this project can hold plates for a second printer. The new plate becomes the current plate and its group the active one. printerPreset optionally selects that group's printer; it affects only the new group and requires saved presets.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "printerPreset": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32768
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
+    "name": "plate_use_another_printer",
+    "method": "plate.use_another_printer",
+    "description": "Give an existing plate a printer group of its own, keeping its objects. The plate becomes current and its new group active, starting as a copy of the old group's presets; select the printer afterwards with preset_select. Requires a fresh plate_list revision and a plate that shares its group with another plate.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "plateIndex": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "expectedPlateRevision": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      },
+      "required": [
+        "plateIndex",
+        "expectedPlateRevision"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    }
+  },
+  {
     "name": "plate_create",
     "method": "plate.create",
     "description": "Create a new plate.",

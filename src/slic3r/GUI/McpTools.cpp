@@ -147,14 +147,45 @@ std::map<std::string, std::string> plate_observations;
 std::deque<std::string> plate_observation_order;
 unsigned long long plate_observation_counter = 0;
 
+// This fork can hold plates for several printers in one project: every plate belongs to a
+// printer group, and the globally selected presets are always the ones of the group of the
+// CURRENT plate. Tools that read or change presets therefore have to say which group they
+// acted on, and tools that touch a plate of another group have to refuse.
+const std::string& group_printer(PartPlateList& plates, int group_id) {
+    static const std::string unknown;
+    for (int id : plates.get_group_ids())
+        if (id == group_id) return plates.group(group_id).name;
+    return unknown;
+}
+
+Json group_json(PartPlateList& plates, int group_id) {
+    return {{"groupId", group_id}, {"printer", group_printer(plates, group_id)}};
+}
+
+Json active_group_json(Plater& plater) {
+    auto& plates = plater.get_partplate_list();
+    return group_json(plates, plates.get_active_group_id());
+}
+
+void require_active_group(PartPlateList& plates, int plate_index, const char* action) {
+    const int group = plates.get_plate(plate_index)->get_group_id();
+    if (group == plates.get_active_group_id()) return;
+    throw RpcError("INTERACTION_REQUIRED", std::string(action) +
+        ": plate " + std::to_string(plate_index) + " belongs to printer group " + std::to_string(group) +
+        " (" + group_printer(plates, group) + "), which is not the active one. Select that plate first.");
+}
+
 std::string plate_fingerprint(Plater& plater, bool include_snapshot = true) {
     Json state = {{"model", std::to_string(plater.model().id().id)}};
     if (include_snapshot) state["snapshot"] = plater.get_active_snapshot_time();
     state["plates"] = Json::array();
-    for (auto* plate : plater.get_partplate_list().get_plate_list()) {
+    auto& plate_list = plater.get_partplate_list();
+    state["activeGroup"] = plate_list.get_active_group_id();
+    for (auto* plate : plate_list.get_plate_list()) {
         const auto volume = plate->get_build_volume();
         state["plates"].push_back({reinterpret_cast<std::uintptr_t>(plate), plate->get_plate_name(),
             plate->is_locked(), static_cast<int>(plate->get_bed_type()), static_cast<int>(plate->get_real_print_seq()),
+            plate->get_group_id(),
             volume.min.x(), volume.min.y(), volume.min.z(), volume.max.x(), volume.max.y(), volume.max.z()});
     }
     state["objects"] = Json::array();
@@ -241,14 +272,19 @@ Json printer_state(Plater& plater) {
         auto* plate = list.get_plate(i);
         plates.push_back({{"index", i}, {"bedType", static_cast<int>(plate->get_bed_type())},
             {"printSequence", static_cast<int>(plate->get_real_print_seq())},
+            {"groupId", plate->get_group_id()}, {"groupPrinter", group_printer(list, plate->get_group_id())},
             {"bounds", bounds_json(plate->get_build_volume())}});
     }
     return {{"selected", {{"printer", bundle.printers.get_selected_preset_name()},
-                {"process", bundle.prints.get_selected_preset_name()}, {"filaments", filaments}}},
-        {"machine", machine}, {"plates", plates}, {"units", "mm"}, {"encoding", "native serialized strings"}};
+                {"process", bundle.prints.get_selected_preset_name()}, {"filaments", filaments},
+                {"group", active_group_json(plater)}}},
+        {"machine", machine}, {"plates", plates},
+        {"hasPrinterGroups", list.has_printer_groups()}, {"activeGroupId", list.get_active_group_id()},
+        {"groupScope", "The selected presets belong to the active printer group, which is the group of the current plate"},
+        {"units", "mm"}, {"encoding", "native serialized strings"}};
 }
 
-Json preset_list(const Json& params) {
+Json preset_list(Plater& plater, const Json& params) {
     const auto kind = text(params, "kind");
     auto& bundle = *wxGetApp().preset_bundle;
     const PresetCollection* collection = nullptr;
@@ -265,7 +301,8 @@ Json preset_list(const Json& params) {
     }
     Json slots = Json::array();
     if (kind == "filament") for (const auto& name : bundle.filament_presets) slots.push_back(name);
-    return {{"kind", kind}, {"selected", collection->get_selected_preset_name()}, {"slots", slots}, {"profiles", profiles}};
+    return {{"kind", kind}, {"selected", collection->get_selected_preset_name()}, {"slots", slots}, {"profiles", profiles},
+        {"group", active_group_json(plater)}};
 }
 
 Json select_preset(Plater& plater, const Json& params) {
@@ -368,6 +405,9 @@ Json effective_settings(Plater& plater, const Json& params) {
     if (params.contains("plateIndex")) {
         check_plate_revision(plater, params);
         const auto i = index(params, "plateIndex", plater.get_partplate_list().get_plate_count());
+        // The global part of the effective configuration is the active group's, so a plate of
+        // another group would be reported against the wrong printer.
+        require_active_group(plater.get_partplate_list(), i, "settings_effective for another printer group");
         plate_config = plater.get_partplate_list().get_plate(i)->config();
         scope["plateIndex"] = i;
     }
@@ -407,6 +447,7 @@ Json effective_settings(Plater& plater, const Json& params) {
         else if (full.has(key)) values[key] = {{"value", full.opt_serialize(key)}, {"source", "global"}};
         else throw RpcError("INVALID_PARAMS", "Unknown setting: " + key);
     }
+    scope["group"] = active_group_json(plater);
     return {{"scope", scope}, {"values", values}, {"encoding", "native serialized strings"}};
 }
 
@@ -416,7 +457,14 @@ Json plate_state(Plater& plater) {
     for (int i = 0; i < list.get_plate_count(); ++i) {
         auto* plate = list.get_plate(i);
         plates.push_back({{"index", i}, {"name", plate->get_plate_name()}, {"locked", plate->is_locked()},
-            {"selected", i == list.get_curr_plate_index()}, {"printable", plate->is_printable()}});
+            {"selected", i == list.get_curr_plate_index()}, {"printable", plate->is_printable()},
+            {"groupId", plate->get_group_id()}, {"groupPrinter", group_printer(list, plate->get_group_id())}});
+    }
+    Json groups = Json::array();
+    for (int id : list.get_group_ids()) {
+        const auto& group = list.group(id);
+        groups.push_back({{"groupId", id}, {"printer", group.name}, {"plateCount", list.get_group_plate_count(id)},
+            {"bed", {{"width", group.width}, {"depth", group.depth}, {"height", group.height}}}});
     }
     const auto revision = reference_id(++plate_observation_counter);
     plate_observations[revision] = plate_fingerprint(plater);
@@ -425,7 +473,11 @@ Json plate_state(Plater& plater) {
         plate_observations.erase(plate_observation_order.front());
         plate_observation_order.pop_front();
     }
-    return {{"plates", plates}, {"selectedIndex", list.get_curr_plate_index()}, {"plateRevision", revision}};
+    const int selected = list.get_curr_plate_index();
+    return {{"plates", plates}, {"selectedIndex", selected}, {"plateRevision", revision},
+        {"hasPrinterGroups", list.has_printer_groups()}, {"activeGroupId", list.get_active_group_id()},
+        {"activeGroupPrinter", group_printer(list, list.get_active_group_id())}, {"groups", groups},
+        {"selectedPrinterPreset", wxGetApp().preset_bundle->printers.get_selected_preset_name()}};
 }
 
 bool modal_open() {
@@ -443,6 +495,10 @@ Json app_state(Plater& plater) {
         {"slicingRunning", plater.background_process().running()}, {"modalOpen", modal_open()},
         {"objectCount", plater.model().objects.size()}, {"plateCount", plater.get_partplate_list().get_plate_count()},
         {"selectedPlateIndex", plater.get_partplate_list().get_curr_plate_index()},
+        {"hasPrinterGroups", plater.get_partplate_list().has_printer_groups()},
+        {"activeGroupId", plater.get_partplate_list().get_active_group_id()},
+        {"activeGroup", active_group_json(plater)},
+        {"groupCount", plater.get_partplate_list().get_group_count()},
         {"platerView", plater.is_preview_shown() ? "preview" : "prepare"}};
 }
 
@@ -715,6 +771,8 @@ void require_object_unlocked(Plater& plater, int object_index_value) {
     for (std::size_t j = 0; j < object.instances.size(); ++j) {
         const int plate = plates.find_instance(object_index_value, j);
         require(plate < 0 || !plates.get_plate(plate)->is_locked(), "Unlock every plate containing the object first");
+        // Filament slots and the validated configuration come from the active group's presets.
+        if (plate >= 0) require_active_group(plates, plate, "Changing an object of another printer group");
     }
 }
 
@@ -728,6 +786,8 @@ Json update_overrides(Plater& plater, const Json& params) {
     if (scope == "plate") {
         check_plate_revision(plater, params);
         const int i = index(params, "plateIndex", plater.get_partplate_list().get_plate_count());
+        // The candidate configuration is validated against the active group's full config.
+        require_active_group(plater.get_partplate_list(), i, "settings_override on another printer group");
         scoped_plate = i;
         auto* plate = plater.get_partplate_list().get_plate(i);
         require(!plate->is_locked(), "Unlock the plate before updating its settings");
@@ -799,7 +859,8 @@ Json update_overrides(Plater& plater, const Json& params) {
     if (plate_config) *plate_config = std::move(candidate);
     else model_config->assign_config(std::move(candidate));
     refresh(plater);
-    return {{"scope", scope}, {"updated", params["values"]}, {"model", model_state(plater)}, {"plates", plate_state(plater)}};
+    return {{"scope", scope}, {"group", active_group_json(plater)}, {"updated", params["values"]},
+        {"model", model_state(plater)}, {"plates", plate_state(plater)}};
 }
 
 std::string mcp_stage_sliced_plate(Plater& plater, const Json& params, bool for_print) {
@@ -857,6 +918,66 @@ Json mcp_export_sliced_3mf(Plater& plater, const Json& params) {
     }
 }
 
+
+// --- printer groups of this fork -------------------------------------------------------
+// Validates a printer preset that is about to become the printer of ONE group.
+const Preset& group_printer_preset(Plater& plater, const Json& params) {
+    auto& bundle = *wxGetApp().preset_bundle;
+    const auto name = text(params, "printerPreset");
+    if (plater.is_presets_dirty())
+        throw RpcError("INTERACTION_REQUIRED", "Save or discard edited presets before selecting another printer");
+    const auto* target = bundle.printers.find_preset(name, false);
+    if (!target || !target->is_visible || !target->is_compatible)
+        throw RpcError("INVALID_PARAMS", "Printer preset is missing, hidden or incompatible");
+    if (target->printer_technology() != ptFFF)
+        throw RpcError("UNSUPPORTED", "Only FFF printer presets are supported");
+    return *target;
+}
+
+Json create_plate_for_printer(Plater& plater, const Json& params) {
+    auto& plates = plater.get_partplate_list();
+    if (plater.is_background_process_slicing())
+        throw RpcError("BUSY", "A slice is running; adding a printer group is refused");
+    std::string printer;
+    if (params.contains("printerPreset")) printer = group_printer_preset(plater, params).name;
+    const int before_plates = plates.get_plate_count();
+    const int before_groups = plates.get_group_count();
+    plater.add_plate_for_another_printer();
+    if (plates.get_plate_count() != before_plates + 1 || plates.get_group_count() != before_groups + 1)
+        throw RpcError("NATIVE_ERROR", "Native plate or printer group creation did not complete; inspect the plate list");
+    const int new_index = plates.get_curr_plate_index();
+    if (new_index != before_plates || plates.get_plate(new_index)->get_group_id() != plates.get_active_group_id())
+        throw RpcError("NATIVE_ERROR", "The new plate is not the current plate of its own printer group");
+    if (!printer.empty()) {
+        // Only the active group is touched: the new plate is current, so its group is active.
+        if (!plater.mcp_select_group_printer(printer))
+            throw RpcError("NATIVE_ERROR", "Native printer selection for the new group was rejected");
+        if (wxGetApp().preset_bundle->printers.get_selected_preset_name() != printer)
+            throw RpcError("NATIVE_ERROR", "Native printer selection for the new group did not take effect");
+    }
+    return {{"plateIndex", new_index}, {"group", active_group_json(plater)},
+        {"printerPresetApplied", printer.empty() ? Json(nullptr) : Json(printer)},
+        {"plates", plate_state(plater)}, {"printer", printer_state(plater)}};
+}
+
+Json use_another_printer_for_plate(Plater& plater, const Json& params) {
+    auto& plates = plater.get_partplate_list();
+    check_plate_revision(plater, params);
+    const int i = index(params, "plateIndex", plates.get_plate_count());
+    if (plater.is_background_process_slicing())
+        throw RpcError("BUSY", "A slice is running; adding a printer group is refused");
+    const int old_group = plates.get_plate(i)->get_group_id();
+    require(plates.get_group_plate_count(old_group) >= 2,
+        "That plate is already the only plate of its printer group");
+    plater.add_printer_group_for_plate(i);
+    const int new_group = plates.get_plate(i)->get_group_id();
+    if (new_group == old_group || new_group != plates.get_active_group_id() || i != plates.get_curr_plate_index())
+        throw RpcError("NATIVE_ERROR", "Native printer group creation did not complete; inspect the plate list");
+    return {{"plateIndex", i}, {"previousGroup", group_json(plates, old_group)}, {"group", active_group_json(plater)},
+        {"nextStep", "Select the printer preset for this group with preset_select while this plate is current"},
+        {"plates", plate_state(plater)}, {"printer", printer_state(plater)}};
+}
+
 #include "McpAdvanced.inc"
 #include "McpPreview.inc"
 
@@ -898,7 +1019,7 @@ const std::map<std::string, Handler>& handlers() {
         {"export.sliced_3mf", [](Plater& p, const Json& a) { return mcp_export_sliced_3mf(p, a); }},
         {"app.get_state", [](Plater& p, const Json&) { return app_state(p); }},
         {"printer.get_state", [](Plater& p, const Json&) { return printer_state(p); }},
-        {"preset.list", [](Plater&, const Json& a) { return preset_list(a); }},
+        {"preset.list", [](Plater& p, const Json& a) { return preset_list(p, a); }},
         {"preset.select", [](Plater& p, const Json& a) { return select_preset(p, a); }},
         {"printer.select_nozzle", [](Plater& p, const Json& a) { return select_nozzle(p, a); }},
         {"settings.effective", [](Plater& p, const Json& a) { return effective_settings(p, a); }},
@@ -1098,6 +1219,8 @@ const std::map<std::string, Handler>& handlers() {
             if (p.select_plate(i, false) != 0) throw RpcError("NATIVE_ERROR", "Could not select plate");
             return plate_state(p);
         }},
+        {"plate.create_for_printer", [](Plater& p, const Json& a) { return create_plate_for_printer(p, a); }},
+        {"plate.use_another_printer", [](Plater& p, const Json& a) { return use_another_printer_for_plate(p, a); }},
         {"plate.create", [](Plater& p, const Json&) {
             p.take_snapshot("MCP create plate");
             auto i = p.get_partplate_list().create_plate();
@@ -1112,6 +1235,7 @@ const std::map<std::string, Handler>& handlers() {
             require(plates.get_plate_count() > 1, "Cannot delete the last plate");
             auto* source = plates.get_plate(i);
             require(!source->is_locked(), "Unlock the plate before deleting it");
+            const int source_group = source->get_group_id();
             const auto instances = source->get_obj_and_inst_set();
             const auto policy = a.contains("contents") ? text(a, "contents") : std::string("require_empty");
             require(policy == "require_empty" || policy == "move" || policy == "delete",
@@ -1125,6 +1249,10 @@ const std::map<std::string, Handler>& handlers() {
                 require(target_index != i, "Move destination must be another plate");
                 auto* target = plates.get_plate(target_index);
                 require(!target->is_locked() && target->empty(), "Move destination must be unlocked and empty");
+                // Plates of different printer groups have different beds, so the objects are not
+                // guaranteed to fit. Refuse instead of silently producing an unprintable plate.
+                require(target->get_group_id() == source->get_group_id(),
+                    "Move destination belongs to another printer group with a different bed; move the instances explicitly instead");
             }
             std::set<int, std::greater<int>> exclusive_objects;
             if (policy == "delete") {
@@ -1136,6 +1264,7 @@ const std::map<std::string, Handler>& handlers() {
                     exclusive_objects.insert(object_index_value);
                 }
             }
+            const int target_group = target_index < 0 ? source_group : plates.get_plate(target_index)->get_group_id();
             p.take_snapshot("MCP delete plate");
             if (policy == "move") {
                 auto* target = plates.get_plate(target_index);
@@ -1162,6 +1291,8 @@ const std::map<std::string, Handler>& handlers() {
             return Json{{"contents", policy}, {"movedInstanceCount", policy == "move" ? instances.size() : 0},
                 {"deletedObjectCount", policy == "delete" ? exclusive_objects.size() : 0},
                 {"destinationPlateIndex", target_index < 0 ? Json(nullptr) : Json(target_index > i ? target_index - 1 : target_index)},
+                {"sourceGroup", group_json(plates, source_group)}, {"targetGroup", target_index < 0 ? Json(nullptr) : group_json(plates, target_group)},
+                {"activeGroup", active_group_json(p)},
                 {"plates", plate_state(p)}, {"model", model_state(p)}};
         }},
         {"plate.rename", [](Plater& p, const Json& a) {
@@ -1178,8 +1309,15 @@ const std::map<std::string, Handler>& handlers() {
             auto& plates = p.get_partplate_list();
             auto from = index(a, "fromIndex", plates.get_plate_count());
             auto to = index(a, "toIndex", plates.get_plate_count());
+            // Reordering repositions every plate between the two indices with the ACTIVE group's
+            // bed size, so it is only safe inside one printer group.
+            for (int i = std::min(from, to); i <= std::max(from, to); ++i)
+                require_active_group(plates, i, "plate_reorder across printer groups");
             if (p.mcp_reorder_plate(from, to) != 0) throw RpcError("NATIVE_ERROR", "Could not reorder plates");
             p.set_plater_dirty(true);
+            const int current = plates.get_curr_plate_index();
+            if (current >= 0 && plates.get_plate(current)->get_group_id() != plates.get_active_group_id())
+                throw RpcError("NATIVE_ERROR", "Plates were reordered but the active printer group no longer matches the current plate");
             return plate_state(p);
         }},
         {"plate.lock", [](Plater& p, const Json& a) {
@@ -1202,18 +1340,31 @@ const std::map<std::string, Handler>& handlers() {
             require(source >= 0, "Instance is not assigned to a plate");
             require(!plates.get_plate(source)->is_locked() && !plates.get_plate(target)->is_locked(),
                 "Unlock both plates before moving the instance");
+            const int source_group = plates.get_plate(source)->get_group_id();
+            const int target_group = plates.get_plate(target)->get_group_id();
+            // The beds of two printer groups differ, so an instance that fits one may not fit the
+            // other, and the instance would be printed with the other group's presets.
+            require(source_group == target_group,
+                "Source and destination plate belong to different printer groups with different beds; refusing the move");
             if (source != target) {
                 p.take_snapshot("MCP move instance to plate");
                 if (plates.add_to_plate(i, j, target) != 0 || plates.find_instance(i, j) != target)
                     throw RpcError("NATIVE_ERROR", "Native plate transfer did not complete; inspect the model");
                 refresh(p);
             }
-            return Json{{"plateIndex", target}, {"model", model_state(p)}, {"plates", plate_state(p)}};
+            return Json{{"plateIndex", target}, {"sourceGroup", group_json(plates, source_group)},
+                {"targetGroup", group_json(plates, target_group)},
+                {"model", model_state(p)}, {"plates", plate_state(p)}};
         }},
         {"plate.clone", [](Plater& p, const Json& a) {
             check_plate_revision(p, a);
             auto& plates = p.get_partplate_list();
             const int source_index = index(a, "plateIndex", plates.get_plate_count());
+            // A new plate is always created in the ACTIVE group, so the source's group has to be
+            // the active one for the clone to end up next to its source.
+            if (plates.get_plate(source_index)->get_group_id() != plates.get_active_group_id() &&
+                p.select_plate(source_index) != 0)
+                throw RpcError("BUSY", "Could not select the source plate's printer group; finish the running slice first");
             auto* source = plates.get_plate(source_index);
             const auto copies = source->get_obj_and_inst_set();
             require(copies.size() <= 100, "Plate has more than 100 instances; clone in smaller groups");
@@ -1237,7 +1388,10 @@ const std::map<std::string, Handler>& handlers() {
                     throw RpcError("NATIVE_ERROR", "Native plate clone partially completed; inspect the model");
             }
             refresh(p);
-            return Json{{"plateIndex", target_index}, {"model", model_state(p)}, {"plates", plate_state(p)}};
+            if (plates.get_plate(target_index)->get_group_id() != plates.get_plate(source_index)->get_group_id())
+                throw RpcError("NATIVE_ERROR", "Cloned plate did not end up in the source plate's printer group");
+            return Json{{"plateIndex", target_index}, {"group", group_json(plates, plates.get_plate(target_index)->get_group_id())},
+                {"model", model_state(p)}, {"plates", plate_state(p)}};
         }},
         {"plate.set_print_sequence", [](Plater& p, const Json& a) {
             check_plate_revision(p, a);
@@ -1298,11 +1452,12 @@ const std::map<std::string, Handler>& handlers() {
             p.select_view(direction);
             return Json{{"direction", direction}};
         }},
-        {"settings.get", [](Plater&, const Json&) {
+        {"settings.get", [](Plater& p, const Json&) {
             auto config = wxGetApp().preset_bundle->full_config_secure();
             Json values = Json::object();
             for (const auto& key : writable_settings()) if (config.has(key)) values[key] = config.opt_serialize(key);
-            return Json{{"scope", "process"}, {"values", values}, {"encoding", "native serialized strings"}, {"writableKeys", writable_settings()}};
+            return Json{{"scope", "process"}, {"group", active_group_json(p)}, {"values", values},
+                {"encoding", "native serialized strings"}, {"writableKeys", writable_settings()}};
         }},
         {"settings.update", [](Plater& p, const Json& a) {
             require(a.contains("values") && a["values"].is_object() && !a["values"].empty(), "Provide settings values");
@@ -1323,7 +1478,7 @@ const std::map<std::string, Handler>& handlers() {
             tab->load_config(candidate);
             p.on_config_change(wxGetApp().preset_bundle->full_config_secure());
             p.update_project_dirty_from_presets();
-            return Json{{"updated", a["values"]}, {"scope", "process"}};
+            return Json{{"updated", a["values"]}, {"scope", "process"}, {"group", active_group_json(p)}};
         }}
     };
     register_advanced_handlers(methods);

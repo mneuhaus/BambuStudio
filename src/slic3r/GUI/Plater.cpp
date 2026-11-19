@@ -30963,6 +30963,12 @@ int Plater::mcp_reorder_plate(int from_index, int to_index)
     p->sidebar->obj_list()->reload_all_plates();
     plates.update_plates();
     update();
+    // move_plate_to_index makes the moved plate current without activating its printer group,
+    // so re-select it to keep the presets and the active group in agreement.
+    const int current = plates.get_curr_plate_index();
+    if (current >= 0 && current < plates.get_plate_count() &&
+        plates.get_plate(current)->get_group_id() != plates.get_active_group_id())
+        return select_plate(current);
     return 0;
 }
 
@@ -31694,10 +31700,29 @@ int Plater::mcp_delete_plate(int plate_index)
     const int result = p->partplate_list.delete_plate(plate_index);
     if (result != 0) return result;
     p->partplate_list.update_slice_context_to_current_plate(p->background_process);
+    // Deleting a plate can empty a printer group, so the presets have to follow the plate
+    // that is current afterwards, exactly as in delete_plate().
+    p->sync_presets_with_active_group();
+    p->update_printer_group_names();
     p->preview->update_gcode_result(p->partplate_list.get_current_slice_result());
     p->sidebar->obj_list()->reload_all_plates();
     update();
     return 0;
+}
+
+bool Plater::mcp_select_group_printer(const std::string &preset_name)
+{
+    Tab *tab = wxGetApp().get_tab(Preset::TYPE_PRINTER);
+    if (tab == nullptr) return false;
+    bool selected = false;
+    update_objects_position_when_select_preset([&selected, tab, &preset_name] {
+        selected = tab->select_preset(preset_name);
+        if (selected) wxGetApp().plater()->on_config_change(wxGetApp().preset_bundle->full_config());
+    });
+    if (!selected) return false;
+    p->update_printer_group_names();
+    update();
+    return true;
 }
 
 int Plater::delete_plate(int plate_index)
