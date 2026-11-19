@@ -4,15 +4,9 @@
 #include "GUI_App.hpp"
 #include "Plater.hpp"
 #include "GUI_ObjectList.hpp"
-#include "DeviceManager.hpp"
-#include "DeviceCore/DevManager.h"
-#include "DeviceCore/DevStorage.h"
-#include "DeviceCore/DevFilaSystem.h"
-#include "DeviceCore/DevMapping.h"
 #include "GLCanvas3D.hpp"
 #include "Tab.hpp"
 #include "BackgroundSlicingProcess.hpp"
-#include "slic3r/Utils/NetworkAgent.hpp"
 #include "libslic3r/AppConfig.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/TriangleSelector.hpp"
@@ -67,20 +61,6 @@ struct UiJob {
 };
 std::deque<UiJob> ui_jobs;
 std::uint64_t next_ui_run = 0;
-struct ExternalJob {
-    std::string id, kind;
-    int plate_index = -1;
-    std::atomic<bool> cancel_requested{false};
-    std::mutex mutex;
-    std::string status = "running", error, message;
-    int progress_percent = 0;
-    Json result = nullptr;
-    bool terminal_recorded = false;
-    std::shared_future<void> done;
-    std::thread worker;
-};
-std::deque<std::shared_ptr<ExternalJob>> external_jobs;
-std::uint64_t next_external_run = 0;
 struct SliceResult {
     std::string id, fingerprint, source, file_identity;
     int plate_index = -1;
@@ -488,68 +468,6 @@ Json ui_job_state(const UiJob& job) {
         {"cancelRequested", job.cancellation_requested}, {"error", job.error}};
 }
 
-std::shared_ptr<ExternalJob> find_external_job(const std::string& id) {
-    for (const auto& job : external_jobs) if (job->id == id) return job;
-    return {};
-}
-
-Json external_job_state(const std::shared_ptr<ExternalJob>& job) {
-    const bool exited = job->done.valid() && job->done.wait_for(std::chrono::seconds(0)) == std::future_status::ready;
-    std::lock_guard<std::mutex> lock(job->mutex);
-    Json error = !exited || job->error.empty() ? Json(nullptr) : Json{{"code", "NATIVE_ERROR"}, {"message", job->error}};
-    return {{"jobId", job->id}, {"kind", job->kind}, {"plateIndex", job->plate_index},
-        {"status", exited ? job->status : job->cancel_requested ? "cancelling" : "running"},
-        {"progressPercent", exited ? job->progress_percent : std::min(job->progress_percent, 99)}, {"message", job->message},
-        {"cancelRequested", job->cancel_requested.load()}, {"completionObserved", exited},
-        {"error", error}, {"result", exited ? job->result : Json(nullptr)}};
-}
-
-void external_progress(const std::shared_ptr<ExternalJob>& job, int percent, std::string message) {
-    std::lock_guard<std::mutex> lock(job->mutex);
-    if (job->terminal_recorded) return;
-    job->progress_percent = std::clamp(percent, 0, 100);
-    job->message = std::move(message);
-}
-
-void external_finish(const std::shared_ptr<ExternalJob>& job, std::string status, std::string error = {}, Json result = nullptr) {
-    std::lock_guard<std::mutex> lock(job->mutex);
-    if (job->terminal_recorded) return;
-    job->terminal_recorded = true;
-    job->status = std::move(status);
-    job->error = std::move(error);
-    job->result = std::move(result);
-    if (job->status == "succeeded") job->progress_percent = 100;
-}
-
-std::shared_ptr<ExternalJob> start_external_job(std::string kind, int plate_index,
-    std::function<void(const std::shared_ptr<ExternalJob>&)> runner) {
-    if (external_jobs.size() >= 32) {
-        auto& oldest = external_jobs.front();
-        {
-            std::lock_guard<std::mutex> lock(oldest->mutex);
-            if (oldest->done.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
-                throw RpcError("BUSY", "External job capacity is full");
-        }
-        if (oldest->worker.joinable()) oldest->worker.join();
-        external_jobs.pop_front();
-    }
-    auto job = std::make_shared<ExternalJob>();
-    job->id = reference_id(++next_external_run) + ":external:" + kind;
-    job->kind = std::move(kind);
-    job->plate_index = plate_index;
-    auto completed = std::make_shared<std::promise<void>>();
-    job->done = completed->get_future().share();
-    job->worker = std::thread([job, completed, runner = std::move(runner)] {
-        try { runner(job); }
-        catch (const std::exception& error) { external_finish(job, "failed", error.what()); }
-        catch (...) { external_finish(job, "failed", "Native external operation failed"); }
-        external_finish(job, "failed", "Native external operation returned without a terminal result");
-        completed->set_value_at_thread_exit();
-    });
-    external_jobs.push_back(job);
-    return job;
-}
-
 void refresh(Plater& plater) {
     plater.set_plater_dirty(true);
     plater.update(true, true);
@@ -618,7 +536,7 @@ std::string slice_input_guard(Plater& plater) {
 
 bool result_current(Plater& plater) {
     auto& background = plater.background_process();
-    if (background.running() || background.mcp_orphans_running()) return false;
+    if (background.running()) return false;
     if (auto* job = slice_jobs.active()) if (job->kind == "slice") return false;
     if (slice_result.id.empty() || slice_result.plate_index != plater.get_partplate_list().get_curr_plate_index() ||
         slice_result.fingerprint != slice_fingerprint(plater)) return false;
@@ -684,10 +602,11 @@ Json validate_slice(Plater& plater, const Json& params) {
     Json errors = Json::array(), warnings = Json::array();
     if (!plate.has_printable_instances()) errors.push_back("Selected plate has no printable instances");
     if (plater.sidebar().has_broken_mixed_filament()) errors.push_back("Native filament assignment is incomplete");
-    StringObjectException warning;
-    const auto error = plater.mcp_validate_slice(&warning);
+    std::vector<StringObjectException> native_warnings;
+    const auto error = plater.mcp_validate_slice(&native_warnings);
     if (!error.string.empty()) errors.push_back(error.string);
-    if (!warning.string.empty()) warnings.push_back(warning.string);
+    for (const auto& warning : native_warnings)
+        if (!warning.string.empty()) warnings.push_back(warning.string);
     const auto* scripts = plater.background_process().fff_print()->full_print_config().opt<ConfigOptionStrings>("post_process");
     if (scripts) for (const auto& script : scripts->values)
         if (script.find_first_not_of(" \t\r\n") != std::string::npos)
@@ -707,7 +626,7 @@ Json slicing_state(Plater& plater) {
         const auto& stats = plate->fff_print()->print_statistics();
         statistics = {{"estimatedNormalTime", stats.estimated_normal_print_time}, {"estimatedSilentTime", stats.estimated_silent_print_time}, {"totalToolchanges", stats.total_toolchanges}};
     }
-    const bool native_busy = plater.background_process().running() || plater.background_process().mcp_orphans_running() || slice_jobs.active();
+    const bool native_busy = plater.background_process().running() || slice_jobs.active();
     const bool native_valid = !native_busy && plate->is_slice_result_valid();
     const bool native_ready = native_valid && plate->is_slice_result_ready_for_export();
     const auto plates = plate_state(plater);
@@ -938,9 +857,7 @@ Json mcp_export_sliced_3mf(Plater& plater, const Json& params) {
     }
 }
 
-#include "McpBatch.inc"
 #include "McpAdvanced.inc"
-#include "McpDevices.inc"
 #include "McpPreview.inc"
 
 const std::map<std::string, Handler>& handlers() {
@@ -949,14 +866,11 @@ const std::map<std::string, Handler>& handlers() {
         {"slice.get_state", [](Plater& p, const Json&) { return slicing_state(p); }},
         {"slice.validate", [](Plater& p, const Json& a) { return validate_slice(p, a); }},
         {"slice.start", [](Plater& p, const Json& a) { return start_slice(p, a); }},
-        {"slice.start_batch", [](Plater& p, const Json& a) { return start_batch(p, a); }},
         {"job.get", [](Plater& p, const Json& a) {
             reconcile_slices(p);
             const auto id = text(a, "jobId");
             if (auto* job = slice_jobs.find(id)) return job_state(*job);
             if (auto* job = find_ui_job(id)) return ui_job_state(*job);
-            if (auto job = find_external_job(id)) return external_job_state(job);
-            if (auto* job = find_batch_job(id)) return batch_job_state(*job);
             throw RpcError("STALE_REFERENCE", "Job is unknown, expired, or belongs to another application session");
         }},
         {"job.cancel", [](Plater& p, const Json& a) {
@@ -977,26 +891,6 @@ const std::map<std::string, Handler>& handlers() {
                     p.mcp_cancel_ui_job();
                 }
                 return ui_job_state(*job);
-            }
-            if (auto job = find_external_job(id)) {
-                {
-                    std::lock_guard<std::mutex> lock(job->mutex);
-                    if (job->done.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
-                        job->cancel_requested = true;
-                    }
-                }
-                return external_job_state(job);
-            }
-            if (auto* job = find_batch_job(id)) {
-                if (!job->completion_observed && !job->cancel_requested) {
-                    job->cancel_requested = true;
-                    job->status = "cancelling";
-                    if (job->current_run) if (auto* child = slice_jobs.find(job->current_run)) {
-                        child->cancellation_requested = true;
-                        p.background_process().mcp_request_cancel(child->run);
-                    }
-                }
-                return batch_job_state(*job);
             }
             throw RpcError("STALE_REFERENCE", "Job is unknown, expired, or belongs to another application session");
         }},
@@ -1433,19 +1327,10 @@ const std::map<std::string, Handler>& handlers() {
         }}
     };
     register_advanced_handlers(methods);
-    register_devices_handlers(methods);
     register_preview_handlers(methods);
     return methods;
     }();
     return methods;
-}
-
-bool device_actions_enabled() {
-    return wxGetApp().app_config->get_bool("mcp_allow_device_actions");
-}
-
-bool account_reads_enabled() {
-    return wxGetApp().app_config->get_bool("mcp_allow_account_reads");
 }
 
 Json execute(Plater& plater, const std::string& method, const Json& params) {
@@ -1453,7 +1338,6 @@ Json execute(Plater& plater, const std::string& method, const Json& params) {
     const std::map<std::string, std::set<std::string>> slice_fields = {
         {"slice.get_state", {}}, {"slice.validate", {"plateIndex", "expectedPlateRevision"}},
         {"slice.start", {"plateIndex", "expectedPlateRevision"}},
-        {"slice.start_batch", {"expectedPlateRevision", "plateIndices"}},
         {"job.get", {"jobId"}}, {"job.cancel", {"jobId"}},
         {"export.gcode", {"plateIndex", "expectedPlateRevision", "sliceResultId", "path", "overwrite"}},
         {"export.sliced_3mf", {"plateIndex", "expectedPlateRevision", "sliceResultId", "path", "overwrite"}}
@@ -1468,25 +1352,16 @@ Json execute(Plater& plater, const std::string& method, const Json& params) {
         Json names = Json::array({"app.get_capabilities"});
         for (const auto& item : handlers()) names.push_back(item.first);
         return {{"sessionId", session_id()}, {"protocolVersion", 1}, {"appVersion", SLIC3R_VERSION}, {"methods", names},
-            {"features", {{"jobCompletionTracking", true}, {"jobTrackingScope", "FFF plate slicing, sequential plate queue, UI jobs and external device jobs"}, {"parameterIndices", "zero-based"}, {"objectReferences", "stable IDs"}, {"plateReferences", "index with required expectedPlateRevision"}, {"securityPolicyVersion", 1}, {"deviceActionsEnabled", device_actions_enabled()}, {"accountReadsEnabled", account_reads_enabled()}}}};
+            {"features", {{"jobCompletionTracking", true}, {"jobTrackingScope", "FFF plate slicing and UI jobs"}, {"parameterIndices", "zero-based"}, {"objectReferences", "stable IDs"}, {"plateReferences", "index with required expectedPlateRevision"}, {"securityPolicyVersion", 1}, {"printerGroups", true}}}};
     }
     const auto it = handlers().find(method);
     if (it == handlers().end()) throw RpcError("UNSUPPORTED", "Method is not implemented in this native build");
-    if ((method == "device.pause" || method == "device.resume" || method == "device.stop" ||
-         method == "calibration.start" || method == "device.upload.start" || method == "device.print.start") &&
-        !device_actions_enabled())
-        throw RpcError("PERMISSION_DENIED", "Printer actions are disabled; enable them in MCP Preferences");
-    if ((method == "account.tasks.list" || method == "account.presets.list") && !account_reads_enabled())
-        throw RpcError("PERMISSION_DENIED", "Cloud account reads are disabled; enable them in MCP Preferences");
     reconcile_slices(plater);
-    const bool read = method == "slice.get_state" || method == "job.get" || method == "job.cancel" || method == "app.get_state" || method == "model.list" || method == "object.inspect" || method == "geometry.faces" || method == "geometry.analyze" || method == "layers.get" || method == "plate.list" || method == "settings.get" || method == "settings.effective" || method == "printer.get_state" || method == "preset.list" || method == "preview.get_summary" || method == "preview.get_layers" || method == "preview.get_toolpaths" || method == "device.list" || method == "device.get_state" || method == "device.upload.plan" || method == "device.print.plan" || method == "ams.inventory" || method == "calibration.get_state" || method == "account.get_state" || method == "account.tasks.list" || method == "account.presets.list" || method == "preferences.get";
+    const bool read = method == "slice.get_state" || method == "job.get" || method == "job.cancel" || method == "app.get_state" || method == "model.list" || method == "object.inspect" || method == "geometry.faces" || method == "geometry.analyze" || method == "layers.get" || method == "plate.list" || method == "settings.get" || method == "settings.effective" || method == "printer.get_state" || method == "preset.list" || method == "preview.get_summary" || method == "preview.get_layers" || method == "preview.get_toolpaths";
     auto* canvas = plater.get_view3D_canvas3D();
     const bool interactive_edit = canvas && (canvas->is_dragging() || canvas->get_gizmos_manager().is_in_editing_mode());
     const bool ui_job_active = std::any_of(ui_jobs.begin(), ui_jobs.end(), [](const UiJob& job) { return !job.completion_observed; });
-    const bool external_job_active = std::any_of(external_jobs.begin(), external_jobs.end(), [](const std::shared_ptr<ExternalJob>& job) {
-        return job->done.wait_for(std::chrono::seconds(0)) != std::future_status::ready;
-    });
-    if (!read && (modal_open() || interactive_edit || plater.is_loading_project() || plater.is_any_job_running() || plater.background_process().running() || plater.background_process().mcp_orphans_running() || slice_jobs.active() || batch_active() || ui_job_active || external_job_active))
+    if (!read && (modal_open() || interactive_edit || plater.is_loading_project() || plater.is_any_job_running() || plater.background_process().running() || slice_jobs.active() || ui_job_active))
         throw RpcError("BUSY", "Finish the active dialog, interactive edit or native job before changing the project");
     return it->second(plater, params);
 }
@@ -1504,10 +1379,6 @@ void mcp_slice_progress(std::uint64_t run, int percent) { slice_jobs.progress(ru
 void mcp_slice_completed(Plater& plater, std::uint64_t run, bool success, bool cancelled, bool worker_stopped, const std::string& error) {
     auto* job = slice_jobs.find(run);
     if (!job || !job->worker_pending) return;
-    struct NotifyBatch {
-        McpSliceJob* job;
-        ~NotifyBatch() { if (job && !job->worker_pending) batch_child_completed(*job); }
-    } notify_batch{job};
     try {
     if (!worker_stopped) {
         job->cancellation_requested = true;
@@ -1556,22 +1427,11 @@ void mcp_require_interactive_import(const char* reason) {
         throw RpcError("INTERACTION_REQUIRED", std::string(reason) + "; open the file in Bambu Studio to resolve it. The project may have changed; inspect state before retrying.");
 }
 
-void mcp_quiesce_external_jobs() {
-    for (const auto& job : external_jobs) job->cancel_requested = true;
-    for (const auto& job : external_jobs) if (job->worker.joinable()) job->worker.join();
-}
-
 void McpTools::set_active(bool active) {
     const bool was_active = mcp_publication_enabled.exchange(active);
     if (active) return;
     if (!was_active) return;
     ++mcp_domain_generation;
-    for (auto& batch : slice_batches)
-        if (!batch.completion_observed) {
-            batch.cancel_requested = true;
-            if (batch.current_run) batch.status = "cancelling";
-            else finish_batch(batch, "cancelled");
-        }
     bool cancel_ui_job = false;
     for (auto& job : ui_jobs)
         if (!job.completion_observed) {
@@ -1590,17 +1450,10 @@ void McpTools::set_active(bool active) {
     completed_slices.clear();
 }
 
-void McpTools::quiesce_external_jobs() {
-    mcp_quiesce_external_jobs();
-    external_jobs.clear();
-}
-
 bool McpTools::has_pending_native_work() {
-    if (slice_jobs.active() || batch_active()) return true;
+    if (slice_jobs.active()) return true;
     for (const auto& job : ui_jobs)
         if (!job.completion_observed) return true;
-    for (const auto& job : external_jobs)
-        if (job->done.valid() && job->done.wait_for(std::chrono::seconds(0)) != std::future_status::ready) return true;
     return false;
 }
 
@@ -1733,14 +1586,6 @@ void validate_refinements(const std::string& method, const Json& args) {
             std::set<Json> unique(args[key].begin(), args[key].end());
             require_value(unique.size() == args[key].size(), "Array values must be unique");
         }
-    if (method == "ams.mapping.plan")
-        require_value(args.contains("amsMapping") && !args["amsMapping"].empty(), "Provide AMS assignments");
-    if (method == "calibration.start") {
-        bool selected = false;
-        for (const char* key : {"vibration", "bedLeveling", "camera", "motorNoise", "nozzle", "bedCalibration", "clumpPosition"})
-            selected |= args.value(key, false);
-        require_value(selected, "Select at least one calibration routine");
-    }
 }
 }
 

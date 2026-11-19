@@ -14,7 +14,6 @@ public:
     static nlohmann::json definitions();
     static nlohmann::json call(Plater& plater, const std::string& name, const nlohmann::json& arguments);
     static void set_active(bool active);
-    static void quiesce_external_jobs();
     static bool has_pending_native_work();
 };
 
