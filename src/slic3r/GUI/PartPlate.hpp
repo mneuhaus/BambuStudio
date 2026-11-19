@@ -687,6 +687,9 @@ struct PlateGroup
     GLTexture   label_texture;
     std::string frame_key;
     std::string label_key;
+    // how far the bed model of the printer reaches beyond the printable area
+    Vec2d       bed_overhang_min{Vec2d::Zero()};
+    Vec2d       bed_overhang_max{Vec2d::Zero()};
 };
 
 class PartPlateList : public ObjectBase

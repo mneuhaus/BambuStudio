@@ -62,9 +62,9 @@ static unsigned int GLOBAL_PLATE_INDEX = 0;
 
 static const double LOGICAL_PART_PLATE_GAP = 1. / 5.;
 // printer groups: extra distance between the rows of two groups, margins of the frame around a group
-static const double PRINTER_GROUP_ROW_GAP       = 45.;
-static const double PRINTER_GROUP_FRAME_LEFT    = 10.;
-static const double PRINTER_GROUP_FRAME_BOTTOM  = 10.;
+static const double PRINTER_GROUP_ROW_GAP       = 75.;
+static const double PRINTER_GROUP_FRAME_LEFT    = 8.;
+static const double PRINTER_GROUP_FRAME_BOTTOM  = 8.;
 static const double PRINTER_GROUP_FRAME_RIGHT   = 28.; // room for the plate icons
 static const double PRINTER_GROUP_FRAME_TOP     = 20.; // room for the plate name
 static const double PRINTER_GROUP_FRAME_RADIUS  = 8.;
@@ -5989,6 +5989,8 @@ int PartPlateList::create_group()
     g->extruder_heights       = active.extruder_heights;
     g->logo_texture_filename  = active.logo_texture_filename;
     g->name                   = active.name;
+    g->bed_overhang_min       = active.bed_overhang_min;
+    g->bed_overhang_max       = active.bed_overhang_max;
     m_groups.emplace_back(std::move(g));
     return id;
 }
@@ -6091,6 +6093,23 @@ void PartPlateList::render_group_frames()
         return;
     store_active_group();
 
+    // The bed model is larger than the printable area. It is only known for the printer that is
+    // loaded, so the active group remembers by how much.
+    if (PlateGroup *active_group = find_group(m_active_group)) {
+        BoundingBoxf3 bed_box;
+        if (m_current_plate >= 0 && m_current_plate < (int) m_plate_list.size() && m_plate_list[m_current_plate]->calc_bed_3d_boundingbox(bed_box)) {
+            const Vec2d overhang_min(-bed_box.min.x(), -bed_box.min.y());
+            const Vec2d overhang_max(bed_box.max.x() - m_plate_width, bed_box.max.y() - m_plate_depth);
+            // While the presets of a group are being loaded the bed model can still be the one of the
+            // previous printer. A model that is smaller than the plate or much larger is not this printer's.
+            const double limit = 60.;
+            if (overhang_min.minCoeff() > -1. && overhang_max.minCoeff() > -1. && overhang_min.maxCoeff() < limit && overhang_max.maxCoeff() < limit) {
+                active_group->bed_overhang_min = overhang_min.cwiseMax(Vec2d::Zero());
+                active_group->bed_overhang_max = overhang_max.cwiseMax(Vec2d::Zero());
+            }
+        }
+    }
+
     const Camera     &camera   = wxGetApp().plater()->get_camera();
     const Transform3d view_mat = camera.get_view_matrix();
     const Transform3d proj_mat = camera.get_projection_matrix();
@@ -6106,8 +6125,8 @@ void PartPlateList::render_group_frames()
             }
         if (!box.defined)
             continue;
-        box.min -= Vec2d(PRINTER_GROUP_FRAME_LEFT, PRINTER_GROUP_FRAME_BOTTOM);
-        box.max += Vec2d(PRINTER_GROUP_FRAME_RIGHT, PRINTER_GROUP_FRAME_TOP);
+        box.min -= Vec2d(PRINTER_GROUP_FRAME_LEFT, PRINTER_GROUP_FRAME_BOTTOM) + g->bed_overhang_min;
+        box.max += Vec2d(PRINTER_GROUP_FRAME_RIGHT, PRINTER_GROUP_FRAME_TOP) + g->bed_overhang_max;
         const bool active = g->id == m_active_group;
 
         // frame: a rectangle with rounded corners
@@ -7444,6 +7463,11 @@ void PartPlateList::calc_bounding_boxes()
 	std::vector<PartPlate*>::iterator it = m_plate_list.begin();
 	for (it = m_plate_list.begin(); it != m_plate_list.end(); it++) {
 		m_bounding_box.merge((*it)->get_bounding_box(true));
+	}
+	// the frames around the printer groups and the printer names above them
+	if (has_mixed_groups() && m_bounding_box.defined) {
+		m_bounding_box.min -= Vec3d(PRINTER_GROUP_FRAME_LEFT + 30., PRINTER_GROUP_FRAME_BOTTOM + 30., 0.);
+		m_bounding_box.max += Vec3d(PRINTER_GROUP_FRAME_RIGHT + 30., PRINTER_GROUP_FRAME_TOP + PRINTER_GROUP_LABEL_HEIGHT + 30., 0.);
 	}
 }
 

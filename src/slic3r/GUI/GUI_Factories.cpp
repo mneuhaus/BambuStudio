@@ -1602,6 +1602,14 @@ void MenuFactory::create_plate_menu()
             return !plater()->get_partplate_list().get_selected_plate()->get_objects().empty() && !plater()->is_background_process_slicing();
         }, m_parent);
 
+    // a new plate with a printer of its own
+    append_menu_item(menu, wxID_ANY, _L("Add Plate for Another Printer"),
+        _L("Adds a plate with its own printer, process and filament presets. Choose the printer in the sidebar afterwards."),
+        [](wxCommandEvent&) {
+            plater()->add_plate_for_another_printer();
+        }, "", nullptr,
+        []() { return !plater()->is_background_process_slicing(); }, m_parent);
+
     // give the current plate its own printer
     append_menu_item(menu, wxID_ANY, _L("Use Another Printer for This Plate"),
         _L("The plate gets its own printer, process and filament presets. Choose the printer in the sidebar afterwards."),
