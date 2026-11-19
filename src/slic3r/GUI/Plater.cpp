@@ -21581,14 +21581,19 @@ void Plater::priv::update_objects_position_when_select_preset(const std::functio
 
         // 8. Compact the plate list by dropping empty non-locked plates.
         //    cur_plate is skipped here and handled separately in 8b.
-        int cur_plate_index = cur_plate_list.get_curr_plate_index();
+        //    Only the plates of the printer group that changed take part, and a group keeps its last
+        //    plate: without one its printer would be gone.
+        const int changed_group   = cur_plate_list.get_active_group_id();
+        int       cur_plate_index = cur_plate_list.get_curr_plate_index();
         for (int idx = cur_plate_list.get_plate_count() - 1; idx >= 0; --idx) {
-            if (cur_plate_list.get_plate_count() <= 1)
+            if (cur_plate_list.get_group_plate_count(changed_group) <= 1)
                 break;
             PartPlate *plate = cur_plate_list.get_plate(idx);
             if (!plate || plate->is_locked())
                 continue;
             if (idx == cur_plate_index)
+                continue;
+            if (plate->get_group_id() != changed_group)
                 continue;
             if (plate->empty()) {
                 cur_plate_list.delete_plate(idx);
@@ -21598,7 +21603,7 @@ void Plater::priv::update_objects_position_when_select_preset(const std::functio
         }
 
         // 8b. Drop cur_plate too if it ended up empty (all-reschedule case).
-        if (cur_plate_list.get_plate_count() > 1) {
+        if (cur_plate_list.get_group_plate_count(changed_group) > 1) {
             const int cur_idx = cur_plate_list.get_curr_plate_index();
             PartPlate *cur_p  = (cur_idx >= 0 && cur_idx < static_cast<int>(cur_plate_list.get_plate_count()))
                                     ? cur_plate_list.get_plate(cur_idx)
@@ -21606,6 +21611,14 @@ void Plater::priv::update_objects_position_when_select_preset(const std::functio
             if (cur_p && !cur_p->is_locked() && cur_p->empty())
                 cur_plate_list.delete_plate(cur_idx);
         }
+        // The plate that became current may belong to another printer group: stay in the group
+        // whose printer was just chosen, its presets are the ones that are loaded.
+        if (cur_plate_list.get_curr_plate()->get_group_id() != changed_group)
+            for (int idx = 0; idx < cur_plate_list.get_plate_count(); ++idx)
+                if (cur_plate_list.get_plate(idx)->get_group_id() == changed_group) {
+                    cur_plate_list.select_plate(idx);
+                    break;
+                }
         cur_plate = cur_plate_list.get_curr_plate();
 
         // 8c. Reschedule/overflow plates skipped the per-plate optimal-position pass
