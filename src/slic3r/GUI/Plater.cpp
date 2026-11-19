@@ -20545,12 +20545,9 @@ bool Plater::priv::sync_presets_with_active_group()
     BOOST_LOG_TRIVIAL(info) << "printer group: switch presets from group " << m_presets_group << " to group " << active_group;
     m_presets_group = active_group;
     const PrinterGroupPresets presets = m_group_presets[active_group];
-    // the view stays where it is: selecting a plate is not a reason to zoom to the bed
-    const bool zoom_to_bed = q->get_camera().requires_zoom_to_bed;
     m_switching_printer_group = true;
     load_group_presets(presets);
     m_switching_printer_group = false;
-    q->get_camera().requires_zoom_to_bed = zoom_to_bed;
     update_printer_group_names();
     return true;
 }
@@ -21943,8 +21940,13 @@ void Plater::priv::set_bed_shape(const Pointfs       &shape,
         partplate_list.update_logo_texture_filename(custom_texture);
     }
     if (new_shape) {
+        // A switch to another printer group changes the bed, but the user only selected a plate:
+        // the view stays where it is.
+        const bool zoom_to_bed = q->get_camera().requires_zoom_to_bed;
         if (view3D) view3D->bed_shape_changed();
         if (preview) preview->bed_shape_changed();
+        if (m_switching_printer_group)
+            q->get_camera().requires_zoom_to_bed = zoom_to_bed;
 
         //BBS: update part plate's size
         // BBS: to be checked
