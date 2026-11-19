@@ -63,6 +63,7 @@ static unsigned int GLOBAL_PLATE_INDEX = 0;
 static const double LOGICAL_PART_PLATE_GAP = 1. / 5.;
 // printer groups: extra distance between the rows of two groups, margins of the frame around a group
 static const double PRINTER_GROUP_ROW_GAP       = 75.;
+static const int    PRINTER_GROUP_MAX_COLS      = 4;   // plates of a group next to each other before a new line starts
 static const double PRINTER_GROUP_FRAME_LEFT    = 8.;
 static const double PRINTER_GROUP_FRAME_BOTTOM  = 8.;
 static const double PRINTER_GROUP_FRAME_RIGHT   = 28.; // room for the plate icons
@@ -5425,6 +5426,18 @@ int PartPlateList::create_plate(bool adjust_position)
 		calc_bounding_boxes();
 	}
 
+	// A plate that starts a new line in its printer group pushes the groups below it down.
+	if (has_mixed_groups()) {
+		bool moved = false;
+		for (int i = 0; i < (int) m_plate_list.size() && !moved; ++i) {
+			const Vec2d expected = compute_shape_position(i, m_plate_cols);
+			const Vec3d current  = m_plate_list[i]->get_origin();
+			moved = std::abs(expected.x() - current.x()) > EPSILON || std::abs(expected.y() - current.y()) > EPSILON;
+		}
+		if (moved)
+			relayout_plates();
+	}
+
 	// update wipe tower config
 	if (m_plater) {
 		// In GUI mode
@@ -6012,7 +6025,7 @@ void PartPlateList::set_plate_group(int plate_index, int group_id)
         if (!m_triangles.is_initialized())
             build_shape_models();
     }
-    // every group has a row of its own, so this moves plates. Their objects move with them.
+    // every group has a block of its own, so this moves plates. Their objects move with them.
     relayout_plates();
 }
 
@@ -6050,40 +6063,58 @@ void PartPlateList::set_group_name(int group_id, const std::string &name)
         g->name = name;
 }
 
+// The plates of a group fill lines of up to PRINTER_GROUP_MAX_COLS plates. Larger groups grow like the
+// stock grid (as many columns as lines), so a group never gets much taller than it is wide.
+static int printer_group_cols(int plate_count)
+{
+    return std::max(compute_colum_count(plate_count), std::min(plate_count, PRINTER_GROUP_MAX_COLS));
+}
+
 Vec2d PartPlateList::compute_group_row_position(int index)
 {
-    // the rows follow the order in which the groups appear in the plate list
-    std::vector<int> rows;
+    // the blocks follow the order in which the groups appear in the plate list
+    std::vector<int> blocks;
+    std::vector<int> counts;
     for (const PartPlate *plate : m_plate_list) {
-        const int id = plate_group_id(plate);
-        if (std::find(rows.begin(), rows.end(), id) == rows.end())
-            rows.push_back(id);
+        const int  id = plate_group_id(plate);
+        const auto it = std::find(blocks.begin(), blocks.end(), id);
+        if (it == blocks.end()) {
+            blocks.push_back(id);
+            counts.push_back(1);
+        } else
+            ++counts[it - blocks.begin()];
     }
 
     int group_id = m_active_group;
-    int col      = 0;
+    int slot     = 0; // position of the plate among the plates of its group
     if (index >= 0 && index < (int) m_plate_list.size()) {
         group_id = plate_group_id(m_plate_list[index]);
         for (int i = 0; i < index; ++i)
             if (plate_group_id(m_plate_list[i]) == group_id)
-                ++col;
+                ++slot;
     } else {
-        // a plate that does not exist yet (or the unprintable one) continues the row of the active group
+        // a plate that does not exist yet (or the unprintable one) comes after the plates of the active group
         for (const PartPlate *plate : m_plate_list)
             if (plate_group_id(plate) == group_id)
-                ++col;
-        col += std::max(0, index - (int) m_plate_list.size());
+                ++slot;
+        slot += std::max(0, index - (int) m_plate_list.size());
     }
 
     double y = 0.;
-    for (size_t row = 0; row < rows.size(); ++row) {
-        const PlateGroup &g = group(rows[row]);
-        if (row > 0)
-            y -= g.depth * (1. + LOGICAL_PART_PLATE_GAP) + PRINTER_GROUP_ROW_GAP;
-        if (rows[row] == group_id)
-            return Vec2d(col * g.width * (1. + LOGICAL_PART_PLATE_GAP), y);
+    for (size_t block = 0; block < blocks.size(); ++block) {
+        const PlateGroup &g        = group(blocks[block]);
+        const double      stride_x = g.width * (1. + LOGICAL_PART_PLATE_GAP);
+        const double      stride_y = g.depth * (1. + LOGICAL_PART_PLATE_GAP);
+        if (block > 0)
+            y -= stride_y + PRINTER_GROUP_ROW_GAP;
+        if (blocks[block] == group_id) {
+            const int cols = printer_group_cols(std::max(counts[block], slot + 1));
+            return Vec2d((slot % cols) * stride_x, y - (slot / cols) * stride_y);
+        }
+        const int cols = printer_group_cols(counts[block]);
+        y -= ((counts[block] - 1) / cols) * stride_y;
     }
-    return Vec2d(col * m_plate_width * (1. + LOGICAL_PART_PLATE_GAP), y);
+    return Vec2d(slot * m_plate_width * (1. + LOGICAL_PART_PLATE_GAP), y);
 }
 
 // A frame around the plates of every printer group and the name of its printer above it.
@@ -6194,7 +6225,7 @@ void PartPlateList::render_group_frames()
 
 void PartPlateList::update_group_layout()
 {
-    // A group that lost its last plate stays (an undo can bring the plate back), it only loses its row.
+    // A group that lost its last plate stays (an undo can bring the plate back), it only loses its place in the layout.
     const Vec2d stride(plate_stride_x(), plate_stride_y());
     if (m_groups.size() > 1 || stride != m_layout_stride)
         relayout_plates();

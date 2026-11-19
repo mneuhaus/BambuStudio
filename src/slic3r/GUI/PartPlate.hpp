@@ -793,7 +793,7 @@ class PartPlateList : public ObjectBase
     struct GroupScope;
     // Group of a plate, the active group if the plate refers to a group that is gone.
     int  plate_group_id(const PartPlate *plate);
-    // Position of a plate when every printer group has a row of its own.
+    // Position of a plate when every printer group has a block of its own (lines of plates, groups below each other).
     Vec2d compute_group_row_position(int index);
     void render_group_frames();
     //generate icon textures
@@ -954,7 +954,7 @@ public:
     // Geometry of a group, the active one included. Falls back to the active group for an unknown id.
     const PlateGroup &group(int group_id);
     void set_group_name(int group_id, const std::string &name);
-    // True if plates of more than one printer group exist. Each group then has a row of its own.
+    // True if plates of more than one printer group exist. Each group then has a block of its own.
     bool has_printer_groups() { return has_mixed_groups(); }
     // Number of plates in a group.
     int  get_group_plate_count(int group_id) const;
