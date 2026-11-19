@@ -11002,8 +11002,11 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
     // Load the 3DConnexion device database.
     mouse3d_controller.load_config(*wxGetApp().app_config);
     // Start the background thread to detect and connect to a HID device (Windows and Linux).
-    // Connect to a 3DConnextion driver (OSX).
+#ifndef __APPLE__
     mouse3d_controller.init();
+#endif
+    // Not on macOS: connecting to the 3Dconnexion driver blocks the start for about 1.6 s whenever the
+    // driver is installed but not running. This build does without 3D mouse support there.
 #ifdef _WIN32
     // Register an USB HID (Human Interface Device) attach event. evt contains Win32 path to the USB device containing VID, PID and other info.
     // This event wakes up the Mouse3DController's background thread to enumerate HID devices, if the VID of the callback event
