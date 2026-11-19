@@ -22164,12 +22164,13 @@ void Plater::priv::set_bed_shape(const Pointfs       &shape,
         partplate_list.update_logo_texture_filename(custom_texture);
     }
     if (new_shape) {
-        // A switch to another printer group changes the bed, but the user only selected a plate:
-        // the view stays where it is.
+        // With printer groups the view shows the plates of several printers. It stays where it is when
+        // a plate of another group is selected or when the printer of a group is changed, instead of
+        // zooming to the one bed that changed.
         const bool zoom_to_bed = q->get_camera().requires_zoom_to_bed;
         if (view3D) view3D->bed_shape_changed();
         if (preview) preview->bed_shape_changed();
-        if (m_switching_printer_group)
+        if (m_switching_printer_group || partplate_list.has_printer_groups())
             q->get_camera().requires_zoom_to_bed = zoom_to_bed;
 
         //BBS: update part plate's size
@@ -30835,6 +30836,8 @@ void Plater::add_plate_for_another_printer()
     update();
     if (select_plate(plate_index) == 0)
         add_printer_group_for_plate(plate_index);
+    // like the "add plate" action: show all plates, the new one starts a block of its own
+    get_camera().requires_zoom_to_plate = REQUIRES_ZOOM_TO_ALL_PLATE;
 }
 
 //BBS: select Plate
