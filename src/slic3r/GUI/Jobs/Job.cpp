@@ -40,7 +40,13 @@ void GUI::Job::update_percent_finish()
 
 void GUI::Job::show_error_info(wxString msg, int code, wxString description, wxString extra)
 {
-    m_progress->show_error_info(msg, code, description, extra);
+    // Jobs report errors from process(), which runs on the worker thread, and the indicator lays out
+    // and resizes its window. Queued on this handler, the call also keeps its place among the status
+    // updates sent before it.
+    if (wxThread::IsMain())
+        m_progress->show_error_info(msg, code, description, extra);
+    else
+        CallAfter([this, msg, code, description, extra] { m_progress->show_error_info(msg, code, description, extra); });
 }
 
 GUI::Job::Job(std::shared_ptr<ProgressIndicator> pri)
