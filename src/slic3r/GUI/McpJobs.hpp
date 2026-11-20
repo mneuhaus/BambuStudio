@@ -11,7 +11,6 @@
 
 namespace Slic3r { namespace GUI {
 struct McpWorkerLifetime {
-    std::atomic<unsigned int> orphans{0};
     void stop() { std::lock_guard<std::mutex> lock(mutex); stopping = true; }
     void publish(const std::function<void()>& callback) {
         std::lock_guard<std::mutex> lock(mutex);

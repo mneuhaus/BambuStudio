@@ -966,6 +966,8 @@ Json use_another_printer_for_plate(Plater& plater, const Json& params) {
     const int i = index(params, "plateIndex", plates.get_plate_count());
     if (plater.is_background_process_slicing())
         throw RpcError("BUSY", "A slice is running; adding a printer group is refused");
+    std::string printer;
+    if (params.contains("printerPreset")) printer = group_printer_preset(plater, params).name;
     const int old_group = plates.get_plate(i)->get_group_id();
     require(plates.get_group_plate_count(old_group) >= 2,
         "That plate is already the only plate of its printer group");
@@ -973,8 +975,20 @@ Json use_another_printer_for_plate(Plater& plater, const Json& params) {
     const int new_group = plates.get_plate(i)->get_group_id();
     if (new_group == old_group || new_group != plates.get_active_group_id() || i != plates.get_curr_plate_index())
         throw RpcError("NATIVE_ERROR", "Native printer group creation did not complete; inspect the plate list");
+    if (!printer.empty()) {
+        // preset_select refuses a printer change while the project holds objects. Here the change
+        // is scoped to the group that was just created, and the fork's own path re-places only
+        // that group's objects, so it is allowed.
+        if (!plater.mcp_select_group_printer(printer))
+            throw RpcError("NATIVE_ERROR", "Native printer selection for the new group was rejected");
+        if (wxGetApp().preset_bundle->printers.get_selected_preset_name() != printer)
+            throw RpcError("NATIVE_ERROR", "Native printer selection for the new group did not take effect");
+    }
     return {{"plateIndex", i}, {"previousGroup", group_json(plates, old_group)}, {"group", active_group_json(plater)},
-        {"nextStep", "Select the printer preset for this group with preset_select while this plate is current"},
+        {"printerPresetApplied", printer.empty() ? Json(nullptr) : Json(printer)},
+        {"nextStep", printer.empty()
+            ? "The group still uses the previous printer. Call this tool again with printerPreset, or change the printer in the sidebar: preset_select refuses a printer change while the project holds objects."
+            : "Check that the plate's objects still fit the new bed"},
         {"plates", plate_state(plater)}, {"printer", printer_state(plater)}};
 }
 
@@ -1600,7 +1614,18 @@ void McpTools::set_active(bool active) {
             job->cancellation_requested = true;
             plater->background_process().mcp_request_cancel(job->run);
         }
+        // Silence only a worker that belongs to an MCP run; a plain interactive slice must keep
+        // publishing its progress and completion events.
+        if (plater->background_process().mcp_current_run() != 0)
+            plater->background_process().mcp_stop_publication();
     }
+    for (auto& job : ui_jobs)
+        if (!job.completion_observed) {
+            job.completion_observed = true;
+            job.state = "cancelled";
+        }
+    while (auto* job = slice_jobs.active())
+        slice_jobs.finish(job->run, "cancelled", "STALE_REFERENCE", "The MCP server was stopped");
     slice_result = {};
     completed_slices.clear();
 }

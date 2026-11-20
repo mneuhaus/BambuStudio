@@ -373,11 +373,11 @@ void BackgroundSlicingProcess::thread_proc()
 			BOOST_LOG_TRIVIAL(warning) << "task (gen " << task_gen
 			                           << ") was force-canceled (current gen " << m_task_generation
 			                           << "), orphaned thread exiting";
+            const int finished_id = m_event_finished_id;
 			lck.unlock();
             // Let a tracked MCP run reach a terminal state; the UI already got its own
             // cancellation event from the force-cancel in stop() / stop_internal().
             if (mcp_run) {
-                const int finished_id = m_event_finished_id;
                 mcp_worker_lifetime->publish([finished_id, mcp_run] {
                     SlicingProcessCompletedEvent event(finished_id, 0, SlicingProcessCompletedEvent::Cancelled, nullptr, mcp_run, true, true);
                     wxQueueEvent(GUI::wxGetApp().mainframe->m_plater, event.Clone());

@@ -59,8 +59,10 @@ GUI::Job::Job(std::shared_ptr<ProgressIndicator> pri)
 
         if (m_finalized) return;
 
+        // An MCP run adds one step above status_range() as its terminal signal, so its
+        // progress has to be clamped. Without a run id nothing changes.
         const bool mcp_terminal = m_mcp_run && evt.GetInt() == status_range() + 1;
-        m_progress->set_progress(std::min(evt.GetInt(), status_range()));
+        m_progress->set_progress(m_mcp_run ? std::min(evt.GetInt(), status_range()) : evt.GetInt());
         if (m_mcp_run && !mcp_terminal) return;
         if (mcp_terminal || evt.GetInt() == status_range() || m_worker_error) {
             // set back the original range and cancel callback
@@ -138,7 +140,9 @@ void GUI::Job::start()
             m_thread = create_thread([this] { this->run(m_worker_error); });
         } catch (std::exception &) {
             BOOST_LOG_TRIVIAL(warning) << current_exception_message();
-            m_worker_error = std::current_exception();
+            // An MCP run needs the failure as an exception so it reports "failed" instead of
+            // finalizing silently; the interactive path keeps its old behaviour.
+            if (m_mcp_run) m_worker_error = std::current_exception();
             update_status(status_range() + (m_mcp_run ? 1 : 0),
                           _(L("Error! Unable to create thread!")));
         }

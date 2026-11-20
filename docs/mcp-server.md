@@ -92,9 +92,14 @@ ones of the group of the **current** plate.
 * `preset_list`, `preset_select`, `printer_select_nozzle`, `settings_get`,
   `settings_update`, `settings_override` and `settings_effective` name the group
   they acted on.
-* `plate_create_for_printer` adds an empty plate in a group of its own and can
-  select that group's printer in one call. `plate_use_another_printer` gives an
-  existing plate a group of its own.
+* `plate_create_for_printer` adds an empty plate in a group of its own;
+  `plate_use_another_printer` gives an existing plate a group of its own. Both
+  take an optional `printerPreset` that selects the printer of that group only,
+  through the same path the sidebar uses
+  (`Plater::update_objects_position_when_select_preset`), which leaves the other
+  groups' plates and objects untouched. `preset_select` with `kind=printer`
+  still refuses while the project holds objects, as upstream; use these two
+  tools for a per-group printer instead.
 * Cross-group operations are refused with a message that names the group:
   `settings_effective` and `settings_override` for a plate of another group,
   `plate_reorder` across groups, `plate_move_instance` and `plate_delete`

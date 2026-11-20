@@ -649,7 +649,6 @@ public:
     unsigned long   mcp_port() const;
     std::string     mcp_address() const;
     bool            mcp_enabled() const;
-    bool            mcp_ready_for_gui_rebuild();
     bool            mcp_call_active() const { return m_mcp_call_active; }
     const std::string &mcp_status() const { return m_mcp_status; }
     void            switch_staff_pick(bool on);

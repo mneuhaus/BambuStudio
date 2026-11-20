@@ -7204,15 +7204,6 @@ bool GUI_App::mcp_enabled() const
     return m_mcp_server && m_mcp_server->is_running();
 }
 
-// The upstream PR vetoed a GUI rebuild while MCP work was pending. This fork keeps the
-// rebuild unconditional, so this only reports whether a rebuild would interrupt MCP work.
-bool GUI_App::mcp_ready_for_gui_rebuild()
-{
-    if (m_mcp_call_active || m_is_recreating_gui || is_closing() || !mainframe || !plater()) return false;
-    auto &background = plater()->background_process();
-    return !plater()->is_any_job_running() && !background.running() && !McpTools::has_pending_native_work();
-}
-
 void GUI_App::mcp_stop()
 {
     ++m_mcp_generation;

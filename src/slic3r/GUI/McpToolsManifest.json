@@ -787,7 +787,7 @@
   {
     "name": "plate_use_another_printer",
     "method": "plate.use_another_printer",
-    "description": "Give an existing plate a printer group of its own, keeping its objects. The plate becomes current and its new group active, starting as a copy of the old group's presets; select the printer afterwards with preset_select. Requires a fresh plate_list revision and a plate that shares its group with another plate.",
+    "description": "Give an existing plate a printer group of its own, keeping its objects. The plate becomes current and its new group active, starting as a copy of the old group's presets. printerPreset optionally selects that group's printer right away, which re-places the objects of this group only; check afterwards that they still fit the new bed. Requires a fresh plate_list revision and a plate that shares its group with another plate.",
     "inputSchema": {
       "type": "object",
       "properties": {
@@ -799,6 +799,11 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 4096
+        },
+        "printerPreset": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32768
         }
       },
       "required": [
