@@ -2298,8 +2298,15 @@ wxBoxSizer* MainFrame::create_side_tools()
                 wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_SEND_TO_PRINTER_ALL));
             else if (m_print_select == eSendMultiApp)
                 wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_SEND_MULTI_APP));
-            else if (m_print_select == eSendBambuConnect)
-                wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_SEND_BAMBU_CONNECT));
+            else if (m_print_select == eSendBambuConnect) {
+                // As for a print: a setting changed a moment ago counts before the file is handed over.
+                if (!m_plater->only_gcode_mode())
+                    m_plater->apply_background_progress();
+                m_print_enable = get_enable_print_status();
+                m_print_btn->Enable(m_print_enable);
+                if (m_print_enable)
+                    wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_SEND_BAMBU_CONNECT));
+            }
             /* else if (m_print_select == ePrintMultiMachine)
                  wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_PRINT_MULTI_MACHINE));*/
         });
