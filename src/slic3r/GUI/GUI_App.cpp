@@ -2602,7 +2602,8 @@ static LogEncOptions s_get_log_enc_opts()
         assert(0 && "get_value_from_config failed");
     }// there are file errors
 
-    enc_options.enc_type = LogEncOptions::LOG_ENC_AES_256_CBC;
+    // This fork writes a readable log: it is there for the person running the build.
+    enc_options.enc_type = LogEncOptions::LOG_ENC_NONE;
     if (enc_options.enc_type == LogEncOptions::LOG_ENC_AES_256_CBC) {
         std::string enc_key_url;
         std::string enc_key_host_env;
