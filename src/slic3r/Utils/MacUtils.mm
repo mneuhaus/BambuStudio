@@ -117,5 +117,35 @@ void install_titlebar_zoom_workaround(void * window)
     });
 }
 
+bool open_url_in_bambu_connect(const char * url)
+{
+    @autoreleasepool {
+        NSURL * target = [NSURL URLWithString:[NSString stringWithUTF8String:url]];
+        if (target == nil)
+            return false;
+
+        NSWorkspace * workspace = [NSWorkspace sharedWorkspace];
+        NSURL *       app       = [workspace URLForApplicationToOpenURL:target];
+        if (app == nil)
+            return false;
+
+        NSString * bundle_id = [[NSBundle bundleWithURL:app] bundleIdentifier];
+        if (bundle_id != nil && [[NSRunningApplication runningApplicationsWithBundleIdentifier:bundle_id] count] > 0)
+            return [workspace openURL:target];
+
+        [workspace openApplicationAtURL:app
+                          configuration:[NSWorkspaceOpenConfiguration configuration]
+                      completionHandler:^(NSRunningApplication * started, NSError * error) {
+                          if (started == nil)
+                              return;
+                          // The window has to be up before the URL is taken.
+                          dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t) (3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                              [[NSWorkspace sharedWorkspace] openURL:target];
+                          });
+                      }];
+        return true;
+    }
+}
+
 } // namespace GUI
 } // namespace Slic3r

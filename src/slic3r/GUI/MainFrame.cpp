@@ -2298,6 +2298,8 @@ wxBoxSizer* MainFrame::create_side_tools()
                 wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_SEND_TO_PRINTER_ALL));
             else if (m_print_select == eSendMultiApp)
                 wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_SEND_MULTI_APP));
+            else if (m_print_select == eSendBambuConnect)
+                wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_SEND_BAMBU_CONNECT));
             /* else if (m_print_select == ePrintMultiMachine)
                  wxPostEvent(m_plater, SimpleEvent(EVT_GLTOOLBAR_PRINT_MULTI_MACHINE));*/
         });
@@ -2405,6 +2407,7 @@ wxBoxSizer* MainFrame::create_side_tools()
                 export_all_sliced_file_btn->SetCornerRadius(0);
 
                 print_plate_btn->Bind(wxEVT_BUTTON, [this, p](wxCommandEvent&) {
+                    wxGetApp().app_config->set_bool("print_button_bambu_connect", false);
                     m_print_btn->SetLabel(_L("Print plate"));
                     m_print_select = ePrintPlate;
                     m_print_enable = get_enable_print_status();
@@ -2468,6 +2471,20 @@ wxBoxSizer* MainFrame::create_side_tools()
                 p->append_button(send_to_printer_all_btn);
                 p->append_button(export_sliced_file_btn);
                 p->append_button(export_all_sliced_file_btn);
+
+                SideButton *send_to_bambu_connect_btn = new SideButton(p, _L("Send to Bambu Connect"), "");
+                send_to_bambu_connect_btn->SetCornerRadius(0);
+                send_to_bambu_connect_btn->Bind(wxEVT_BUTTON, [this, p](wxCommandEvent &) {
+                    // Remembered, see set_print_button_to_default(). "Print plate" takes it back.
+                    wxGetApp().app_config->set_bool("print_button_bambu_connect", true);
+                    m_print_btn->SetLabel(_L("Send to Bambu Connect"));
+                    m_print_select = eSendBambuConnect;
+                    m_print_enable = get_enable_print_status();
+                    m_print_btn->Enable(m_print_enable);
+                    this->Layout();
+                    p->Dismiss();
+                });
+                p->append_button(send_to_bambu_connect_btn);
 
 
                 if (check_bbl_farm_client_installed()) {
@@ -2669,6 +2686,10 @@ bool MainFrame::get_enable_print_status()
             enable = false;
         }
         enable = enable && !is_all_plates;
+    } else if (m_print_select == eSendBambuConnect) {
+        if (m_plater->only_gcode_mode() || m_plater->using_exported_file())
+            return true;
+        enable = current_plate->is_slice_result_ready_for_print() && !is_all_plates;
     }
 
     BOOST_LOG_TRIVIAL(info) << boost::format("m_print_select %1%, enable= %2% ")%m_print_select %enable;
@@ -4486,8 +4507,11 @@ void MainFrame::on_config_changed(DynamicPrintConfig* config) const
 void MainFrame::set_print_button_to_default(PrintSelectType select_type)
 {
     if (select_type == PrintSelectType::ePrintPlate) {
-        m_print_btn->SetLabel(_L("Print plate"));
-        m_print_select = ePrintPlate;
+        // This runs whenever the presets are loaded. Someone who prints through Bambu Connect keeps that
+        // as the default instead of choosing it again after every printer change and start.
+        const bool bambu_connect = wxGetApp().app_config->get_bool("print_button_bambu_connect");
+        m_print_btn->SetLabel(bambu_connect ? _L("Send to Bambu Connect") : _L("Print plate"));
+        m_print_select = bambu_connect ? eSendBambuConnect : ePrintPlate;
         if (m_print_enable)
             m_print_enable = get_enable_print_status();
         m_print_btn->Enable(m_print_enable);

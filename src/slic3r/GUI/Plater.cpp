@@ -150,6 +150,7 @@
 #include "../Utils/UndoRedo.hpp"
 #include "../Utils/PresetUpdater.hpp"
 #include "../Utils/Process.hpp"
+#include "../Utils/MacUtils.hpp"
 #include "../Utils/HelioDragon.hpp"
 #include "RemovableDriveManager.hpp"
 #include "InstanceCheck.hpp"
@@ -10511,6 +10512,7 @@ public:
     void on_action_send_to_printer(bool isall = false);
     void on_action_send_to_multi_machine(SimpleEvent&);
     void on_action_send_to_multi_app(SimpleEvent&);
+    void on_action_send_to_bambu_connect(SimpleEvent&);
     int update_print_required_data(Slic3r::DynamicPrintConfig config, Slic3r::Model model, Slic3r::PlateDataPtrs plate_data_list, std::string file_name, std::string file_path);
 private:
     friend class Plater;
@@ -10997,6 +10999,7 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
         q->Bind(EVT_GLTOOLBAR_SEND_TO_PRINTER_ALL, &priv::on_action_export_to_sdcard_all, this);
         q->Bind(EVT_GLTOOLBAR_PRINT_MULTI_MACHINE, &priv::on_action_send_to_multi_machine, this);
         q->Bind(EVT_GLTOOLBAR_SEND_MULTI_APP, &priv::on_action_send_to_multi_app, this);
+        q->Bind(EVT_GLTOOLBAR_SEND_BAMBU_CONNECT, &priv::on_action_send_to_bambu_connect, this);
         q->Bind(EVT_GLCANVAS_PLATE_SELECT, &priv::on_plate_selected, this);
         q->Bind(EVT_DOWNLOAD_PROJECT, &priv::on_action_download_project, this);
         q->Bind(EVT_IMPORT_MODEL_ID, &priv::on_action_request_model_id, this);
@@ -19822,6 +19825,58 @@ void Plater::priv::on_action_send_to_multi_app(SimpleEvent &)
     //todo
 #endif //__APPLE__
 
+}
+
+// Hands the sliced file of the current plate to Bambu Connect, which sends it to a printer.
+void Plater::priv::on_action_send_to_bambu_connect(SimpleEvent &)
+{
+    auto failed = [this](const wxString &message) {
+        GUI::MessageDialog(q, message, _L("Send to Bambu Connect"), wxOK | wxICON_WARNING).ShowModal();
+    };
+
+    // The same file a print job would upload.
+    if (q->send_gcode(partplate_list.get_curr_plate_index(), [](int, int, int, bool &) {}) != 0) {
+        failed(_L("Failed to prepare the sliced file."));
+        return;
+    }
+    PrintPrepareData data;
+    q->get_print_job_data(&data);
+
+    // Bambu Connect reads the file when the import is confirmed there, which can be after this project
+    // was closed: it gets a copy of its own, under the name of the project and plate.
+    wxString name = q->get_export_gcode_filename("", true, false);
+    if (name.empty())
+        name = "plate";
+    const fs::path folder = fs::temp_directory_path() / "bambu_connect_handoff";
+    const fs::path file   = folder / into_path(name + ".gcode.3mf");
+    try {
+        fs::create_directories(folder);
+        // Copies of earlier hand-offs are dropped after a day.
+        const std::time_t yesterday = std::time(nullptr) - 24 * 60 * 60;
+        for (const fs::directory_entry &entry : fs::directory_iterator(folder)) {
+            boost::system::error_code ec;
+            if (fs::last_write_time(entry.path(), ec) < yesterday && !ec)
+                fs::remove(entry.path(), ec);
+        }
+        std::string error;
+        if (copy_file(data._3mf_path.string(), file.string(), error) != SUCCESS)
+            throw Slic3r::RuntimeError(error);
+    } catch (const std::exception &e) {
+        BOOST_LOG_TRIVIAL(error) << "send to Bambu Connect: " << e.what();
+        failed(_L("Failed to prepare the sliced file."));
+        return;
+    }
+
+    // See https://wiki.bambulab.com/en/software/third-party-integration
+    const std::string url = "bambu-connect://import-file?path=" + Http::url_encode(file.string()) + "&name=" + Http::url_encode(into_u8(name)) + "&version=1.0.0";
+    BOOST_LOG_TRIVIAL(info) << "send to Bambu Connect: " << url;
+#ifdef __APPLE__
+    const bool opened = open_url_in_bambu_connect(url.c_str());
+#else
+    const bool opened = wxLaunchDefaultBrowser(from_u8(url));
+#endif
+    if (!opened)
+        failed(_L("Bambu Connect was not found. Please install it and try again."));
 }
 
 void Plater::priv::on_action_print_plate_from_sdcard(SimpleEvent&)
