@@ -13,6 +13,11 @@ namespace GUI {
 // 仅在 macOS 27.2 及以上安装，低版本系统直接返回。幂等，重复调用只安装一次。
 void install_titlebar_zoom_workaround(void * window);
 
+// Opens a "bambu-connect://" URL in Bambu Connect. Bambu Connect drops a URL that starts it, so when it
+// does not run yet it is started first and gets the URL a moment later. Returns false when no
+// application is registered for the URL.
+bool open_url_in_bambu_connect(const char * url);
+
 #endif
 
 } // namespace GUI
