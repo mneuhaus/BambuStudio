@@ -15,6 +15,7 @@
 #include <wx/string.h>
 #include <wx/tokenzr.h>
 #include <wx/event.h>
+#include <wx/clipbrd.h>
 #include <wx/gdicmn.h>
 #include <wx/simplebook.h>
 #include "OG_CustomCtrl.hpp"
@@ -1432,6 +1433,32 @@ void PreferencesDialog::Split(const std::string &src, const std::string &separat
     dest.push_back(substring);
 }
 
+void PreferencesDialog::update_mcp_controls(const std::string &error)
+{
+    std::string display_error = error;
+    if (m_mcp_enabled_checkbox) m_mcp_enabled_checkbox->SetValue(wxGetApp().app_config->get_bool("mcp_server_enabled"));
+    if (m_mcp_port_input) m_mcp_port_input->GetTextCtrl()->ChangeValue(std::to_string(wxGetApp().mcp_port()));
+    const std::string address = wxGetApp().mcp_address();
+    if (m_mcp_address_label) m_mcp_address_label->SetLabel(wxString::FromUTF8(address.empty() ? "Unavailable" : address));
+    if (m_mcp_copy_address_button) m_mcp_copy_address_button->Enable(!address.empty());
+    if (m_mcp_token_label) {
+        std::string token;
+        std::string token_error;
+        if (m_mcp_token_visible && !wxGetApp().mcp_copy_token(token, token_error)) {
+            m_mcp_token_visible = false;
+            if (display_error.empty()) display_error = token_error;
+        }
+        m_mcp_token_label->SetLabel(m_mcp_token_visible ? wxString::FromUTF8(token) : wxString::FromUTF8("\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022"));
+    }
+    if (m_mcp_show_token_button) m_mcp_show_token_button->SetLabel(m_mcp_token_visible ? _L("Hide token") : _L("Show token"));
+    if (m_mcp_status_label) {
+        m_mcp_status_label->SetLabel(wxString::FromUTF8(display_error.empty() ? wxGetApp().mcp_status() : display_error));
+        auto *scrolled = static_cast<wxScrolledWindow *>(m_mcp_status_label->GetParent()->GetParent());
+        scrolled->Layout();
+        scrolled->FitInside();
+    }
+}
+
 wxWindow *PreferencesDialog::create_general_tab()
 {
     auto        scrolled = new ScrollPanel(m_book);
@@ -1517,6 +1544,144 @@ wxWindow *PreferencesDialog::create_general_tab()
 
     auto item_downloads = create_item_downloads(scrolled, 50, "download_path");
 
+    m_mcp_enabled_checkbox = new ::CheckBox(scrolled);
+    m_mcp_enabled_checkbox->SetValue(wxGetApp().app_config->get_bool("mcp_server_enabled"));
+    auto item_mcp_enabled = new wxBoxSizer(wxHORIZONTAL);
+    item_mcp_enabled->SetMinSize(wxSize(-1, FromDIP(ITEM_MIN_HEIGHT)));
+    item_mcp_enabled->AddSpacer(FromDIP(ITEM_LEFT_PADDING));
+    item_mcp_enabled->Add(make_row_title(scrolled, _L("Enable local MCP server"), FromDIP(TITLE_WIDTH),
+                                         _L("Allow local AI clients to prepare models in this Bambu Studio window.")),
+                          wxSizerFlags().CenterVertical().Proportion(1).Border(wxRIGHT, FromDIP(TITLE_CONTROL_GAP)));
+    item_mcp_enabled->Add(m_mcp_enabled_checkbox, wxSizerFlags().CenterVertical().Border(wxRIGHT, FromDIP(ITEM_RIGHT_PADDING)));
+    m_mcp_enabled_checkbox->Bind(wxEVT_TOGGLEBUTTON, [this](wxCommandEvent &event) {
+        std::string error;
+        wxGetApp().mcp_set_enabled(m_mcp_enabled_checkbox->GetValue(), error);
+        update_mcp_controls(error);
+        event.Skip();
+    });
+
+    m_mcp_port_input = new ::TextInput(scrolled, wxEmptyString, wxEmptyString, wxEmptyString, wxDefaultPosition,
+                                      wxSize(FromDIP(INPUT_WIDTH), FromDIP(ITEM_MIN_HEIGHT)), wxTE_PROCESS_ENTER);
+    m_mcp_port_input->GetTextCtrl()->ChangeValue(std::to_string(wxGetApp().mcp_port()));
+    m_mcp_port_input->GetTextCtrl()->SetValidator(wxTextValidator(wxFILTER_DIGITS));
+    auto item_mcp_port = new wxBoxSizer(wxHORIZONTAL);
+    item_mcp_port->SetMinSize(wxSize(-1, FromDIP(ITEM_MIN_HEIGHT)));
+    item_mcp_port->AddSpacer(FromDIP(ITEM_LEFT_PADDING));
+    item_mcp_port->Add(make_row_title(scrolled, _L("Port"), FromDIP(TITLE_WIDTH), _L("Use a port from 1024 to 65535.")),
+                       wxSizerFlags().CenterVertical().Proportion(1).Border(wxRIGHT, FromDIP(TITLE_CONTROL_GAP)));
+    item_mcp_port->Add(m_mcp_port_input, wxSizerFlags().CenterVertical().Border(wxRIGHT, FromDIP(ITEM_RIGHT_PADDING)));
+    auto commit_mcp_port = [this] {
+        unsigned long port = 0;
+        std::string error;
+        if (!m_mcp_port_input->GetTextCtrl()->GetValue().ToULong(&port))
+            error = "Choose a port from 1024 to 65535";
+        else
+            wxGetApp().mcp_set_port(port, error);
+        update_mcp_controls(error);
+    };
+    m_mcp_port_input->GetTextCtrl()->Bind(wxEVT_TEXT_ENTER, [commit_mcp_port](wxCommandEvent &event) {
+        commit_mcp_port();
+        event.Skip();
+    });
+    m_mcp_port_input->GetTextCtrl()->Bind(wxEVT_KILL_FOCUS, [commit_mcp_port](wxFocusEvent &event) {
+        commit_mcp_port();
+        event.Skip();
+    });
+
+    m_mcp_status_label = new ::Label(scrolled, ::Label::Body_13, wxString::FromUTF8(wxGetApp().mcp_status()), LB_AUTO_WRAP);
+    m_mcp_status_label->Wrap(FromDIP(640 - ITEM_LEFT_PADDING - ITEM_RIGHT_PADDING));
+    auto item_mcp_status = new wxBoxSizer(wxVERTICAL);
+    auto item_mcp_status_title = new wxBoxSizer(wxHORIZONTAL);
+    item_mcp_status_title->AddSpacer(FromDIP(ITEM_LEFT_PADDING));
+    item_mcp_status_title->Add(make_row_title(scrolled, _L("Status"), FromDIP(TITLE_WIDTH)));
+    item_mcp_status->Add(item_mcp_status_title, wxSizerFlags().Expand());
+    auto item_mcp_status_value = new wxBoxSizer(wxHORIZONTAL);
+    item_mcp_status_value->AddSpacer(FromDIP(ITEM_LEFT_PADDING));
+    item_mcp_status_value->Add(m_mcp_status_label, wxSizerFlags(1).Expand().Border(wxRIGHT, FromDIP(ITEM_RIGHT_PADDING)));
+    item_mcp_status->Add(item_mcp_status_value, wxSizerFlags().Expand());
+
+    const std::string mcp_address = wxGetApp().mcp_address();
+    m_mcp_address_label = new ::Label(scrolled, ::Label::Body_13,
+                                      wxString::FromUTF8(mcp_address.empty() ? "Unavailable" : mcp_address), LB_AUTO_WRAP);
+    m_mcp_address_label->Wrap(FromDIP(640 - ITEM_LEFT_PADDING - ITEM_RIGHT_PADDING - 100));
+    m_mcp_copy_address_button = new Button(scrolled, _L("Copy address"));
+    m_mcp_copy_address_button->SetMinSize(wxSize(FromDIP(100), FromDIP(BTN_HEIGHT)));
+    m_mcp_copy_address_button->SetFont(::Label::Body_12);
+    m_mcp_copy_address_button->Enable(!mcp_address.empty());
+    auto item_mcp_address = new wxBoxSizer(wxVERTICAL);
+    auto item_mcp_address_title = new wxBoxSizer(wxHORIZONTAL);
+    item_mcp_address_title->AddSpacer(FromDIP(ITEM_LEFT_PADDING));
+    item_mcp_address_title->Add(make_row_title(scrolled, _L("Address"), FromDIP(TITLE_WIDTH)));
+    item_mcp_address->Add(item_mcp_address_title, wxSizerFlags().Expand());
+    auto item_mcp_address_value = new wxBoxSizer(wxHORIZONTAL);
+    item_mcp_address_value->AddSpacer(FromDIP(ITEM_LEFT_PADDING));
+    item_mcp_address_value->Add(m_mcp_address_label, wxSizerFlags(1).CenterVertical().Border(wxRIGHT, FromDIP(8)));
+    item_mcp_address_value->Add(m_mcp_copy_address_button, wxSizerFlags().CenterVertical().Border(wxRIGHT, FromDIP(ITEM_RIGHT_PADDING)));
+    item_mcp_address->Add(item_mcp_address_value, wxSizerFlags().Expand());
+    m_mcp_copy_address_button->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) {
+        const std::string address = wxGetApp().mcp_address();
+        if (address.empty()) {
+            update_mcp_controls();
+            return;
+        }
+        if (!wxTheClipboard->Open()) {
+            update_mcp_controls("Could not open the clipboard");
+            return;
+        }
+        const bool copied = wxTheClipboard->SetData(new wxTextDataObject(wxString::FromUTF8(address)));
+        wxTheClipboard->Close();
+        update_mcp_controls(copied ? "Address copied to clipboard" : "Could not copy the address");
+    });
+
+    auto *copy_mcp_token = new Button(scrolled, _L("Copy token"));
+    m_mcp_show_token_button = new Button(scrolled, _L("Show token"));
+    auto *regenerate_mcp_token = new Button(scrolled, _L("Regenerate"));
+    copy_mcp_token->SetMinSize(wxSize(FromDIP(85), FromDIP(BTN_HEIGHT)));
+    m_mcp_show_token_button->SetMinSize(wxSize(FromDIP(90), FromDIP(BTN_HEIGHT)));
+    regenerate_mcp_token->SetMinSize(wxSize(FromDIP(85), FromDIP(BTN_HEIGHT)));
+    copy_mcp_token->SetFont(::Label::Body_12);
+    m_mcp_show_token_button->SetFont(::Label::Body_12);
+    regenerate_mcp_token->SetFont(::Label::Body_12);
+    auto item_mcp_token = new wxBoxSizer(wxVERTICAL);
+    auto item_mcp_token_actions = new wxBoxSizer(wxHORIZONTAL);
+    item_mcp_token_actions->AddSpacer(FromDIP(ITEM_LEFT_PADDING));
+    item_mcp_token_actions->Add(make_row_title(scrolled, _L("Access token"), FromDIP(220)),
+                        wxSizerFlags().CenterVertical().Proportion(1).Border(wxRIGHT, FromDIP(8)));
+    item_mcp_token_actions->Add(copy_mcp_token, wxSizerFlags().CenterVertical().Border(wxRIGHT, FromDIP(8)));
+    item_mcp_token_actions->Add(m_mcp_show_token_button, wxSizerFlags().CenterVertical().Border(wxRIGHT, FromDIP(8)));
+    item_mcp_token_actions->Add(regenerate_mcp_token, wxSizerFlags().CenterVertical().Border(wxRIGHT, FromDIP(ITEM_RIGHT_PADDING)));
+    item_mcp_token->Add(item_mcp_token_actions, wxSizerFlags().Expand());
+    m_mcp_token_label = new ::Label(scrolled, ::Label::Body_13, wxString::FromUTF8("\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022"), LB_AUTO_WRAP);
+    m_mcp_token_label->Wrap(FromDIP(640 - ITEM_LEFT_PADDING - ITEM_RIGHT_PADDING));
+    auto item_mcp_token_value = new wxBoxSizer(wxHORIZONTAL);
+    item_mcp_token_value->AddSpacer(FromDIP(ITEM_LEFT_PADDING));
+    item_mcp_token_value->Add(m_mcp_token_label, wxSizerFlags(1).Expand().Border(wxRIGHT, FromDIP(ITEM_RIGHT_PADDING)));
+    item_mcp_token->Add(item_mcp_token_value, wxSizerFlags().Expand());
+    m_mcp_show_token_button->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) {
+        m_mcp_token_visible = !m_mcp_token_visible;
+        update_mcp_controls();
+    });
+    copy_mcp_token->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) {
+        std::string token;
+        std::string error;
+        if (!wxGetApp().mcp_copy_token(token, error)) {
+            update_mcp_controls(error);
+            return;
+        }
+        if (!wxTheClipboard->Open()) {
+            update_mcp_controls("Could not open the clipboard");
+            return;
+        }
+        const bool copied = wxTheClipboard->SetData(new wxTextDataObject(wxString::FromUTF8(token)));
+        wxTheClipboard->Close();
+        update_mcp_controls(copied ? "Access token copied to clipboard" : "Could not copy the access token");
+    });
+    regenerate_mcp_token->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) {
+        std::string error;
+        const bool rotated = wxGetApp().mcp_regenerate_token(error);
+        update_mcp_controls(rotated ? "Access token regenerated; update connected clients" : error);
+    });
+
     sizer->Add(title_basic, wxSizerFlags().Expand().Border(wxTOP, FromDIP(24)));
     sizer->AddSpacer(FromDIP(8));
     auto flags = row_flags();
@@ -1537,6 +1702,12 @@ wxWindow *PreferencesDialog::create_general_tab()
         priv_row->SetToolTip(minor_restricted_tip());
     sizer->Add(priv_row, flags);
     sizer->Add(wrap_option_row(scrolled, item_downloads), flags);
+    sizer->Add(create_item_title(_L("Local MCP server"), scrolled, _L("Local MCP server")), wxSizerFlags().Expand().Border(wxTOP, FromDIP(24)));
+    sizer->Add(wrap_option_row(scrolled, item_mcp_enabled), flags);
+    sizer->Add(wrap_option_row(scrolled, item_mcp_port), flags);
+    sizer->Add(wrap_option_row(scrolled, item_mcp_status), flags);
+    sizer->Add(wrap_option_row(scrolled, item_mcp_address), flags);
+    sizer->Add(wrap_option_row(scrolled, item_mcp_token), flags);
     scrolled->SetSizer(sizer);
     scrolled->FitInside();
     return scrolled;
@@ -2126,6 +2297,9 @@ void PreferencesDialog::on_reset_preferences()
     MessageDialog dlg(this, _L("Are you sure you want to reset all preferences? Changes will take effect after restart."), _L("Reset"), wxICON_QUESTION | wxOK | wxCANCEL);
     if (dlg.ShowModal() != wxID_OK) return;
 
+    std::string mcp_error;
+    wxGetApp().mcp_set_enabled(false, mcp_error);
+
     // Reset to factory defaults. Touch only UI preference keys — keep vendor /
     // printer / preset state intact, which AppConfig::reset() would also clear.
     static const char *kPrefKeys[] = {
@@ -2178,10 +2352,13 @@ void PreferencesDialog::on_reset_preferences()
         "enable_webview_devtools",
         "severity_level",
         "texture_import_color_tolerance",
+        "mcp_server_enabled",
+        "mcp_server_port",
     };
     for (const char *k : kPrefKeys) app_config->erase("app", k);
     app_config->set_defaults();
     app_config->save();
+    update_mcp_controls();
 }
 
 void PreferencesDialog::on_select_radio(std::string param)

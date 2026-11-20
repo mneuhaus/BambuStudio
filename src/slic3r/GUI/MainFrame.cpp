@@ -38,6 +38,8 @@
 #include "I18N.hpp"
 #include "GLCanvas3D.hpp"
 #include "Plater.hpp"
+#include "BackgroundSlicingProcess.hpp"
+#include "McpTools.hpp"
 #include "WebViewDialog.hpp"
 #include "../Utils/Process.hpp"
 #include "format.hpp"
@@ -640,6 +642,7 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
 
         MarkdownTip::ExitTip();
 
+        wxGetApp().mcp_pause_for_gui_shutdown();
         m_plater->reset();
         this->shutdown();
         // propagate event
@@ -1153,6 +1156,7 @@ void MainFrame::update_layout()
 void MainFrame::shutdown()
 {
     BOOST_LOG_TRIVIAL(info) << "enter";
+    wxGetApp().mcp_pause_for_gui_shutdown();
 
     // The rich parameter tooltip is a wxPopupTransientWindow parented to this frame. Both teardown
     // paths funnel through here (app close, and the language-switch GUI rebuild via recreate_GUI),

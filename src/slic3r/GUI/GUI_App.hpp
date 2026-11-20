@@ -3,6 +3,7 @@
 
 #include <atomic>
 #include <functional>
+#include <cstddef>
 #include <memory>
 #include <string>
 #include "ImGuiWrapper.hpp"
@@ -82,6 +83,7 @@ class UserManager;
 class DeviceManager;
 class NetworkAgent;
 class TaskManager;
+class McpServer;
 
 namespace GUI{
 
@@ -384,6 +386,14 @@ private:
     wxString         m_info_dialog_content;
     wxString         m_install_preset_fail_text;
     HttpServer       m_http_server;
+    std::unique_ptr<McpServer> m_mcp_server;
+    std::shared_ptr<int> m_mcp_lifetime = std::make_shared<int>(0);
+    size_t m_mcp_generation = 0;
+    bool m_mcp_call_active = false;
+    std::string m_mcp_status = "Off";
+    unsigned long m_mcp_active_port = 0;
+    bool mcp_start_on_port(unsigned long port, const std::string &token, std::string &error);
+    void mcp_stop();
 #if !BBL_RELEASE_TO_PUBLIC
     std::function<void(const nlohmann::json&)> m_fila_debug_sink;
 #endif
@@ -631,6 +641,16 @@ public:
     void            stop_sync_user_preset();
     void            start_http_server();
     void            stop_http_server();
+    bool            mcp_set_enabled(bool enabled, std::string &error);
+    bool            mcp_set_port(unsigned long port, std::string &error);
+    bool            mcp_regenerate_token(std::string &error);
+    void            mcp_pause_for_gui_shutdown();
+    bool            mcp_copy_token(std::string &token, std::string &error);
+    unsigned long   mcp_port() const;
+    std::string     mcp_address() const;
+    bool            mcp_enabled() const;
+    bool            mcp_call_active() const { return m_mcp_call_active; }
+    const std::string &mcp_status() const { return m_mcp_status; }
     void            switch_staff_pick(bool on);
 
     void            on_show_check_privacy_dlg(int online_login = 0);
